@@ -10,11 +10,8 @@ python3 rshm.pyz web          # web on the right: a name, group/name, or any uni
 python3 rshm.pyz web db       # one host in each pane: copy straight between them
 ```
 
-Copy it into your PATH as `rshm` for a plain command (or `pip install .`). Build the single file with:
-
-```sh
-python3 -c "import zipapp; zipapp.create_archive('.', 'rshm.pyz', '/usr/bin/env python3', 'rshm.__main__:main', filter=lambda p: p.parts[0] == 'rshm' and p.suffix == '.py')"
-```
+Copy it into your PATH as `rshm` for a plain command (or `pip install .`). rshm makes the single file of itself,
+from wherever it runs (this source, a pip install, a `.pyz`): `python3 -m rshm --pyz rshm.pyz`.
 
 Linux, macOS, BSD or Termux, a UTF-8 terminal, OpenSSH 8.4+. Servers: anything that speaks SFTP (OpenSSH,
 Windows OpenSSH, Dropbear with sftp-server, SFTP-only and chrooted accounts).
@@ -22,6 +19,9 @@ Windows OpenSSH, Dropbear with sftp-server, SFTP-only and chrooted accounts).
 ## Keys
 
 Each pane shows a folder, here or on a host, or the host list to pick one (`F9`). Letters do the same as F-keys.
+`F1` and `rshm --help` list them all, from the one table the keys run on. The panes sit side by side, one above the
+other when the terminal stands upright (a phone, Termux), and one at a time (`Tab` swaps) when two don't fit. The
+bottom border shows the entry under the cursor `ls -l` style: mode, owner, size.
 
 | Key | Files | Host list |
 |---|---|---|
@@ -29,7 +29,7 @@ Each pane shows a folder, here or on a host, or the host list to pick one (`F9`)
 | `←` `h` `⌫` | parent folder (out of an archive at its top) | fold / to group |
 | `F3` `v` · `F4` `e` | view · edit | · `e` edit config |
 | `F5` `c` · `F6` `m` | copy · move to the other pane | |
-| `F7` `n` · `F8` `x` `Del` · `R` · `A` | new folder · delete · rename · permissions | |
+| `F7` `n` · `F8` `x` `Del` · `R` · `A` | new folder · delete · rename · attributes: `644 alice:staff` | |
 | `Space` `Ins` · `*` · `+` `-` | mark · all / none · mark / unmark by pattern | |
 | `.` · `S` | dotfiles show / hide · sort by name, size, date | |
 | `F2` | your `[commands]` | |
@@ -78,6 +78,7 @@ db = { host = "db", path = "/srv/db" } # path: the folder to start in
 |---|---|
 | Copy, move | between any two panes: here ↔ host, host ↔ host (through this machine), within one host (by the server itself on OpenSSH 9.0+), out of archives; a folder into a folder merges, asking first if anything gets replaced; a move within one file system is a rename |
 | Transfers | byte for byte; each file travels as `NAME.rshm-part` and is renamed into place when complete; permissions travel with it, a replaced file keeps its own; a dropped link reconnects and resumes; `Ctrl-C` stops, starting again resumes |
+| Attributes | `A`: mode and owner of the marked entries (or the one under the cursor); only what you change from the shown values is applied; names or numbers; on a host, names as its own listing shows them |
 | View, edit | built in: a host's file is read into memory and saved straight back, never written here; your tools get a private local copy, saved back only if changed (a failed save keeps it and says where); over 50 MB asks first |
 | Archives | zip, jar, tar, tar.gz / bz2 / xz open like folders, read-only, nested too; a host's is copied here first, and removed on the way out |
 | Logins | one per host, shared by both panes and every transfer; tried quietly first (keys, agent, your `SSH_ASKPASS`), else ssh asks in the terminal |
@@ -89,7 +90,8 @@ db = { host = "db", path = "/srv/db" } # path: the folder to start in
 | Limit | Note |
 |---|---|
 | shell, `[commands]` on a host | need a POSIX shell there; browsing and transfers need none |
-| replacing a file | it then belongs to whoever copied it; hard links, ACLs and SELinux labels don't carry over |
+| replacing a file | it then belongs to whoever copied it (owners travel only through `A`); hard links, ACLs and SELinux labels don't carry over |
+| ACLs, SELinux labels | not shown or set yet; they will come through `chattr`, the one door attributes use |
 | resumed transfer | trusts its `.rshm-part`: if the source changed meanwhile, delete it first |
 | skipped in trees | pipes, sockets, devices, symlinked folders; links inside archives |
 | built-in editor | a tab shows as `»`, wide characters as one cell; for more, set `[tools] edit` |
@@ -102,7 +104,7 @@ db = { host = "db", path = "/srv/db" } # path: the folder to start in
 | `config.py` | the config: hosts (its tree plus `~/.ssh/config`), tools, `[open]`, `[commands]` |
 | `ssh.py` | logins: one OpenSSH master per host |
 | `sftp.py` | the SFTP v3 client |
-| `fs.py` | one file system interface: `Local`, `Remote`, `Archive`; copy, delete, save across any two |
+| `fs.py` | one file system interface: `Local`, `Remote`, `Archive`; copy, delete, save across any two; `chattr` for attributes |
 | `ui.py` | the panes; `KEYS` is the one table behind dispatch, the F-key bar, the help menu and `--help` |
 | `view.py` `edit.py` `screen.py` | the built-in viewer and editor, and what every screen shares |
 
@@ -112,5 +114,5 @@ A new action: a method on `App` and one row in `KEYS`. A new place to browse: a 
 
 | Run | Checks |
 |---|---|
-| `python3 test_rshm.py` | the logic, every copy direction, archives, viewer and editor, offline |
-| `python3 test_live.py` | `rshm.pyz` on a real screen in a terminal against a throwaway sshd on a local port, through a jump, as you, removed afterwards (needs `pyte`) |
+| `python3 test_rshm.py` | the logic: config, hosts, layouts, every copy direction, attributes, archives, viewer and editor, offline |
+| `python3 test_live.py` | the `rshm.pyz` it builds of itself, on a real screen in a terminal: every key and the mouse here, the layouts as the terminal turns and shrinks; then hosts through a throwaway sshd and a jump. As you, in a temp folder removed afterwards (needs `pyte`; the host part needs `sshd`) |

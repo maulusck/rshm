@@ -1,10 +1,23 @@
 """rshm [HOST [HOST]]: one host opens in the right pane (this machine on the left), two side by side."""
-import argparse, atexit, curses, signal, sys, tomllib
+import argparse, atexit, curses, importlib.resources, os, signal, sys, tomllib, zipfile
 from pathlib import Path
 
 from . import __version__, config
 from .ssh import logout
 from .ui import App, keys_help
+
+
+def pyz(out):  # this very rshm as one runnable file, from wherever it runs (source, pip, a .pyz)
+    tmp = out.with_name(f".{out.name}.rshm-tmp")
+    with open(tmp, "wb") as f:
+        f.write(b"#!/usr/bin/env python3\n")
+        with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as z:
+            for r in sorted(importlib.resources.files(__package__).iterdir(), key=lambda r: r.name):
+                if r.name.endswith(".py"):
+                    z.writestr(f"rshm/{r.name}", r.read_bytes())
+            z.writestr("__main__.py", "from rshm.__main__ import main\nmain()\n")
+    tmp.chmod(0o755)
+    os.replace(tmp, out)
 
 
 def main():
@@ -14,7 +27,10 @@ def main():
     ap.add_argument("host", nargs="*", help="up to two hosts to open (name, group/name or unique substring)")
     ap.add_argument("-c", "--config", type=Path, help=f"config file (default: {config.locate()}, if there)")
     ap.add_argument("-V", "--version", action="version", version=f"rshm {__version__}")
+    ap.add_argument("--pyz", type=Path, metavar="FILE", help="write this rshm as one runnable file (python3 FILE) and exit")
     a = ap.parse_args()
+    if a.pyz:
+        return pyz(a.pyz.expanduser())
     cfg = a.config.expanduser() if a.config else config.locate()
     if a.config and not cfg.exists():
         ap.error(f"{cfg}: no such file")

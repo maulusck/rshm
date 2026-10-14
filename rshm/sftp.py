@@ -1,5 +1,5 @@
 """SFTP v3 (draft-ietf-secsh-filexfer-02), the version every server speaks, over `ssh -s host sftp`."""
-import struct, subprocess, tempfile
+import re, struct, subprocess, tempfile
 from collections import deque
 
 from .ssh import argv, last
@@ -32,12 +32,12 @@ class Reader:
     def str(r):
         return r.take(r.u32())
 
-    def attrs(r):  # size, type/permissions, modified time; owners are skipped
+    def attrs(r):  # size, owner ids, type/permissions, modified time
         f, a = r.u32(), {}
         if f & 1:
             a["size"] = struct.unpack(">Q", r.take(8))[0]
         if f & 2:
-            r.take(8)  # uid, gid
+            a["uid"], a["gid"] = r.u32(), r.u32()
         if f & 4:
             a["perm"] = r.u32()
         if f & 8:
@@ -147,7 +147,9 @@ class SFTP:  # one session on the host's master: no remote shell, exact byte nam
         try:
             while r := s.call(12, h):
                 for _ in range(r.u32()):
-                    n, _, a = r.str(), r.str(), r.attrs()
+                    n, long, a = r.str(), r.str().split(), r.attrs()
+                    if len(long) > 3 and re.fullmatch(rb"[-dlcbps][-rwxsStT]{9}[.+@]?", long[0]):  # `ls -l`: names
+                        a["user"], a["group"] = long[2].decode(errors="replace"), long[3].decode(errors="replace")
                     if n not in (b"", b".", b"..") and b"/" not in n:  # real entries only
                         out.append((n.decode(errors="surrogateescape"), a))
         finally:
@@ -163,8 +165,14 @@ class SFTP:  # one session on the host's master: no remote shell, exact byte nam
     def unlink(s, p):
         s.call(13, p)
 
-    def chmod(s, p, mode):
-        s.call(9, p, 4, mode)  # SETSTAT permissions
+    def chattr(s, p, ch):  # SETSTAT: permissions ("perm") and owner ("uid", "gid"; the pair goes together)
+        flags, args = 0, []
+        if "uid" in ch or "gid" in ch:
+            a = s.stat(p, follow=False)
+            flags, args = 2, [ch.get("uid", a.get("uid", 0)), ch.get("gid", a.get("gid", 0))]
+        if "perm" in ch:
+            flags, args = flags | 4, [*args, ch["perm"]]
+        s.call(9, p, flags, *args)
 
     def rename(s, a, b, replace=True):  # replace: atomically where the server can (OpenSSH), else remove then rename
         if not replace:

@@ -2,13 +2,16 @@
 tar, read-only). Everything a pane does goes through these primitives, so copy, move and delete work between any two.
 
     name                                its label
-    realpath(p) ("" = home) stat(p, follow) listdir(d) mkdir(p) rmdir(p) unlink(p) rename(a, b, replace) chmod(p, mode)
+    realpath(p) ("" = home) stat(p, follow) listdir(d) mkdir(p) rmdir(p) unlink(p) rename(a, b, replace)
+    chattr(p, changes)                  changes: {"perm", "uid", "gid"}; the one door for attributes (ACLs and
+                                        SELinux labels will come through it too)
+    attrs: {"size", "perm", "mtime", "uid", "gid", "user", "group"}, each only when known
     read(p, off, size) -> chunks        write(p, chunks, off, mode, done)
     run(script, d) -> (argv, cwd)       a shell command in folder d, on the terminal
     alive()                             False once a session dropped (a transfer then reconnects and resumes)
     close()
 """
-import os, posixpath, re, shlex, stat, tarfile, time, zipfile
+import functools, grp, os, posixpath, pwd, re, shlex, stat, tarfile, time, zipfile
 from collections import defaultdict
 
 from .sftp import CHUNK, SFTP
@@ -34,8 +37,22 @@ def join(d, n):
     return f"{d.rstrip('/')}/{n}"
 
 
+@functools.cache
+def names(uid, gid):  # this machine's user and group names for two ids; the number when there is none
+    try:
+        user = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        user = str(uid)
+    try:
+        return user, grp.getgrgid(gid).gr_name
+    except KeyError:
+        return user, str(gid)
+
+
 def attrs(st):
-    return {"size": st.st_size, "perm": st.st_mode, "mtime": int(st.st_mtime)}
+    user, group = names(st.st_uid, st.st_gid)
+    return {"size": st.st_size, "perm": st.st_mode, "mtime": int(st.st_mtime), "uid": st.st_uid, "gid": st.st_gid,
+            "user": user, "group": group}
 
 
 class Local:
@@ -65,8 +82,11 @@ class Local:
             raise FileExistsError(f"{b}: already exists")
         os.rename(a, b)
 
-    def chmod(s, p, mode):
-        os.chmod(p, mode)
+    def chattr(s, p, ch):
+        if "uid" in ch or "gid" in ch:
+            os.chown(p, ch.get("uid", -1), ch.get("gid", -1))
+        if "perm" in ch:  # after the owner: chown may drop setuid bits
+            os.chmod(p, ch["perm"])
 
     def read(s, p, off, size):
         with open(p, "rb") as f:
@@ -98,7 +118,7 @@ class Local:
 
 
 class Remote:  # a host; its SFTP session opens on first use and reopens after a drop
-    PRIMS = {"stat", "listdir", "mkdir", "rmdir", "unlink", "rename", "chmod", "read", "write"}
+    PRIMS = {"stat", "listdir", "mkdir", "rmdir", "unlink", "rename", "chattr", "read", "write"}
 
     def __init__(s, h, term, say):
         s.h, s.term, s.say, s.sf, s.name = h, term, say, None, h["host"]
@@ -151,7 +171,8 @@ class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a fold
                 for m in s.z.getmembers():
                     kind = stat.S_IFDIR if m.isdir() else stat.S_IFLNK if m.issym() else stat.S_IFREG if m.isfile() \
                         or m.islnk() else stat.S_IFIFO
-                    s.files["/" + m.name.strip("/")] = {"size": m.size, "ref": m, "perm": kind | m.mode, "mtime": m.mtime}
+                    s.files["/" + m.name.strip("/")] = {"size": m.size, "ref": m, "perm": kind | m.mode, "mtime": m.mtime,
+                                                        "uid": m.uid, "gid": m.gid, "user": m.uname, "group": m.gname}
         except (tarfile.TarError, zipfile.BadZipFile, EOFError) as e:
             raise OSError(f"{name}: not an archive I can read ({e})") from None
         for p in list(s.files):  # folders only implied by the paths in them
@@ -188,7 +209,7 @@ class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a fold
     def readonly(s, *_, **__):
         raise OSError(f"{s.name} is an archive: read-only")
 
-    mkdir = rmdir = unlink = rename = chmod = write = run = readonly
+    mkdir = rmdir = unlink = rename = chattr = write = run = readonly
 
     def alive(s):
         return True

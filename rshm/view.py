@@ -21,7 +21,7 @@ def find(n, row, q, start, step):  # the next of n rows (from start, step ±1, w
 
 
 def view(scr, data, title, C):  # C: the theme's colors (norm, sel, acc, dim, err, brand)
-    hexed, wrap, top, q, msg = b"\0" in data[:8192], True, 0, "", ""
+    hexed, wrap, top, q, msg, hit = b"\0" in data[:8192], True, 0, "", "", None  # hit: the row of the last match
     lines = [safe(ln) for ln in data.decode("utf-8", "replace").expandtabs(8).split("\n")]
     if lines[-1:] == [""] and len(lines) > 1:
         lines.pop()  # the final newline ends the last line; it isn't one more
@@ -36,7 +36,7 @@ def view(scr, data, title, C):  # C: the theme's colors (norm, sel, acc, dim, er
         top = max(0, min(top, n - (H - 1)))
         scr.erase()
         for y in range(min(H - 1, n - top)):
-            scr.addnstr(y, 0, row(top + y), W - 1, C[0])
+            scr.addnstr(y, 0, row(top + y).ljust(W - 1), W - 1, C[1] if top + y == hit else C[0])
         where = f"{min(top + H - 1, n) * 100 // n}%"
         keys = f"  {where}  / find  n N  w wrap{'' if wrap else ' off'}  x {'text' if hexed else 'hex'}  q quit "
         scr.addnstr(H - 1, 0, bar(f" {msg or safe(title)}", keys, W), W - 1, C[4 if msg else 2] | curses.A_BOLD)
@@ -49,10 +49,9 @@ def view(scr, data, title, C):  # C: the theme's colors (norm, sel, acc, dim, er
         elif c == ord(" "):
             top += H - 2
         elif c == ord("w"):
-            wrap = not wrap
+            wrap, hit = not wrap, None
         elif c == ord("x"):
-            hexed = not hexed
-            top = 0
+            hexed, top, hit = not hexed, 0, None
         elif c == ord("/") or c in (ord("n"), ord("N")) and q:
             if c == ord("/"):
                 q = readline(scr, H - 1, "find:", "", C[2] | curses.A_BOLD)
@@ -68,4 +67,4 @@ def view(scr, data, title, C):  # C: the theme's colors (norm, sel, acc, dim, er
             if i is None:
                 msg = f"✗ {safe(q)}: not found"
             else:
-                top = i
+                top = hit = i

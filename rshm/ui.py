@@ -1,5 +1,5 @@
 """The screen: two panes, each showing a folder on this machine or on any host, or the host list to pick one from."""
-import atexit, contextlib, curses, fnmatch, os, shlex, shutil, signal, stat, subprocess, sys, tempfile, time, tomllib
+import atexit, contextlib, curses, fnmatch, grp, os, pwd, shlex, shutil, signal, stat, subprocess, sys, tempfile, time, tomllib
 from collections import deque
 
 from . import config, edit as editor, screen, view as viewer
@@ -24,7 +24,7 @@ KEYS = {  # the one source for key dispatch, the help menu, the F-key bar and --
     "files": [("⏎ → l", "open / view", "open"), ("← h ⌫", "parent folder", "parent"),
               ("Space Ins", "mark", "mark"), ("*", "mark all / none", "markall"),
               ("+ -", "mark / unmark by pattern", "markpat"), (".", "dotfiles: show / hide", "dotfiles"),
-              ("S", "sort: name, size, date", "sort"), ("A", "permissions", "chmod"),
+              ("S", "sort: name, size, date", "sort"), ("A", "attributes: mode, owner", "chattr"),
               ("F3 v", "view", "view"), ("F4 e", "edit", "edit"),
               ("F5 c", "copy to the other pane", "copy"), ("F6 m", "move to the other pane", "move"),
               ("F7 n", "new folder", "mkdir"), ("F8 x Del", "delete", "delete"), ("R", "rename", "rename"),
@@ -42,6 +42,20 @@ SPIN, BIG = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", 50 << 20  # spinner frames; view/e
 ORDER = {"name": lambda x: x[0].casefold(), "size": lambda x: -x[1].get("size", 0), "date": lambda x: -x[1].get("mtime", 0)}
 LOCAL = {"host": "local"}  # the host-list entry for this machine
 SHELL = 'exec "${SHELL:-sh}" -l'
+
+
+MIN_W, MIN_H, PANE_W, PANE_H = 20, 6, 24, 4  # the whole screen, and one pane (title row included), at the least
+
+
+def layout(H, W):  # -> ([(pane or None for the focused one, y, x, h, w)], log rows), or None when too small
+    logn = 3 if H >= 18 else 1
+    A = H - 2 - logn  # rows for the panes; below them the activity border, its log, the key bar
+    side = [(0, 0, 0, A, W // 2), (1, 0, W // 2, A, W - W // 2)]
+    stack = [(0, 0, 0, A // 2, W), (1, A // 2, 0, A - A // 2, W)]
+    for rects in (stack, side) if 2 * H > W else (side, stack):  # portrait (a cell is about twice as tall as wide)
+        if all(h >= PANE_H and w >= PANE_W for *_, h, w in rects):
+            return rects, logn
+    return ([(None, 0, 0, A, W)], logn) if W >= MIN_W and H >= MIN_H else None
 
 
 def keys_help():  # `rshm --help` shows the same table the app runs on
@@ -95,7 +109,7 @@ class Pane:  # a folder on some file system, or the host list to pick one
 class App:
     def __init__(s, scr, cfg):
         s.cfg, s.scr, s.msg, s.typing = cfg, scr, "", None
-        s.panes, s.focus, s.n, s.mid = [Pane(), Pane()], 0, 1, 1
+        s.panes, s.focus, s.rects, s.single = [Pane(), Pane()], 0, [], False
         s.local, s.remotes, s.hosts, s.c, s.cmds, s.theme_name = Local(), {}, {}, {}, {}, "default"
         s.dots, s.order = True, "name"  # show dotfiles; sort by
         curses.curs_set(0)
@@ -370,21 +384,43 @@ class App:
             s.sync(p)
         s.msg = f"sorted by {s.order}"
 
-    def chmod(s):  # the marked entries (or the one under the cursor) get the permissions typed, in octal
+    def chattr(s):  # mode and owner of the marked entries (or the one under the cursor): what you change, changes
         p = s.P
         items = p.targets()
         if not items:
             return
-        mode = s.ask("permissions (octal):", f"{stat.S_IMODE(items[0][1].get('perm', 0)):o}")
-        if mode:
+        a = items[0][1]
+        was = f"{stat.S_IMODE(a.get('perm', 0)):o} {a.get('user', a.get('uid', ''))}:{a.get('group', a.get('gid', ''))}"
+        new = s.ask("attributes (mode owner:group):", was)
+        if not new or new == was:
+            return
+        (mode, *own), (wmode, wown) = new.split(), was.split()
+        ch = {}
+        if mode != wmode:
             try:
-                m = int(mode, 8)
+                ch["perm"] = int(mode, 8)
             except ValueError:
-                raise OSError(f"{safe(mode)}: not octal, like 644") from None
-            for n, _ in items:
-                p.fs.chmod(join(p.cwd, n), m)
-            s.relist()
-            s.msg = f"✓ permissions {m:o}"
+                raise OSError(f"{safe(mode)}: not an octal mode, like 644") from None
+        if own and own[0] != wown:
+            for key, name in zip(("uid", "gid"), own[0].partition(":")[::2]):
+                if name:
+                    ch[key] = s.owner_id(p, key, name)
+        for n, _ in items:
+            p.fs.chattr(join(p.cwd, n), ch)
+        s.relist()
+        s.msg = f"✓ {new}"
+
+    def owner_id(s, p, key, name):  # a user or group name as its number: on a host, as its files show it
+        kind = {"uid": "user", "gid": "group"}[key]
+        if name.isdigit():
+            return int(name)
+        found = next((a[key] for _, a in p.items if a and a.get(kind) == name and key in a), None)
+        if found is None and isinstance(p.fs, Local):
+            with contextlib.suppress(KeyError):
+                found = pwd.getpwnam(name).pw_uid if key == "uid" else grp.getgrnam(name).gr_gid
+        if found is None:
+            raise OSError(f"{safe(name)}: no {kind} by that name here; its number works")
+        return found
 
     def view(s):
         s.launch("view")
@@ -552,7 +588,7 @@ class App:
             cmd = s.cmds[names[i]]
             for k, v in sub.items():
                 cmd = cmd.replace(k, v)
-            s.run(p, f"{cmd}; printf '\\n[exit %s] ⏎ ' $?; read _ _", p.cwd)
+            s.run(p, f"{cmd}; printf '\\n[exit %s] ⏎ ' $?; read _", p.cwd)
 
     def run(s, p, script, d):  # a shell command on the pane's machine, on the terminal; then show what changed
         cmd, cwd = p.fs.run(script, d)
@@ -719,7 +755,8 @@ class App:
         H, W = s.scr.getmaxyx()
         if y is None:
             v = s.P.v
-            y, x = v.sel - v.top + 1, s.focus * s.mid + 2
+            _, py, px, _, _ = next((r for r in s.rects if r[0] == s.focus), (0, 0, 0, 0, 0))
+            y, x = py + v.sel - v.top + 1, px + 2
         w, h = min(max(len(l) + len(k) for l, k in items) + 6, W), min(len(items) + 2, H)
         y, x = max(0, min(y, H - h)), max(0, min(x, W - w))
         win = curses.newwin(h, w, y, x)
@@ -763,20 +800,23 @@ class App:
             _, x, y, _, b = curses.getmouse()
         except curses.error:
             return
-        side = int(x >= s.mid)
+        hit = next(((i, py, h) for i, py, px, h, w in s.rects if py <= y < py + h and px <= x < px + w), None)
+        if not hit:
+            return
+        i, py, h = hit
         if b & (WHEEL_UP | WHEEL_DOWN):
-            s.focus = side
+            s.focus = i
             return s.step(-3 if b & WHEEL_UP else 3)
         if b & RIGHT_CLICK:
-            s.focus = side
+            s.focus = i
             return s.help(y, x)
-        if not b & LEFT_CLICK or not 0 < y <= s.n:
+        if not b & LEFT_CLICK or y == py:
             return
-        p = s.panes[side]
-        j = p.v.top + y - 1
+        p = s.panes[i]
+        j = p.v.top + y - py - 1
         if j < len(p.v.rows):
-            again = s.focus == side and j == p.v.sel
-            s.focus, p.v.sel = side, j
+            again = s.focus == i and j == p.v.sel
+            s.focus, p.v.sel = i, j
             if again or p.mode == "hosts":  # a host or group answers the first click; a file the second
                 s.open() if p.mode == "files" else s.hopen()
 
@@ -790,7 +830,7 @@ class App:
 
     def paint_work(s):  # the live line at the bottom of the activity panel: spinner, what, how long
         H, W = s.scr.getmaxyx()
-        if s.working and H >= 8 and W >= 40:
+        if s.working and layout(H, W):
             line = f" {SPIN[s.frame % len(SPIN)]} {safe(s.working)}  {time.monotonic() - s.t0:.0f}s"
             try:
                 s.scr.addnstr(H - 2, 0, line.ljust(W - 1), W - 1, s.C[2] | curses.A_BOLD)
@@ -802,64 +842,82 @@ class App:
         t = "hosts" if p.mode == "hosts" else safe(f"{p.fs.name}:{p.cwd}")
         return " " + screen.bar(t, tail, w - 3).rstrip() + " "
 
-    def paint_pane(s, i, x, w, n):
-        p, active = s.panes[i], i == s.focus
-        v = p.v
+    def paint_pane(s, i, y, x, h, w, W):  # pane i in its rectangle: a title row, then its rows
+        p, active, sc = s.panes[i], i == s.focus, s.scr
+        v, n = p.v, h - 1
         v.sel = min(v.sel, max(len(v.rows) - 1, 0))
         v.top = min(max(v.top, v.sel - n + 1), v.sel)
-        sc = s.scr
-        corner = "┌" if not i else "┬"
-        sc.addnstr(0, x, f"{corner}─{s.title(p, w)}".ljust(w, "─") + ("┐" if i else ""), w + i, s.C[2 if active else 3])
+        left, right = ("┌" if not y else "├") if not x else "┬", "┐" if x + w == W and not y else "┤" if x + w == W else ""
+        sc.addnstr(y, x, f"{left}─{s.title(p, w)}".ljust(w - len(right), "─") + right, w, s.C[2 if active else 3])
+        lx = x + bool(x)  # a pane on the right has the separator to its left
+        cw = x + w - lx - 1
         for r in range(n):
+            if x:
+                sc.addstr(y + 1 + r, x, "│", s.C[3])
             j = r + v.top
-            if i:
-                sc.addstr(r + 1, x, "│", s.C[3])
             if j >= len(v.rows):
                 continue
-            cursor = j == v.sel
             if p.mode == "hosts":
-                dep, k, h, path = v.rows[j]
-                ico = ("●" if h is p.host else "○") if h else ("▸" if path in p.closed else "▾")
-                text, at = f" {'  ' * dep}{ico} {safe(k)}", s.C[0 if h else 2]
+                dep, k, hst, path = v.rows[j]
+                ico = ("●" if hst is p.host else "○") if hst else ("▸" if path in p.closed else "▾")
+                text, at = f" {'  ' * dep}{ico} {safe(k)}", s.C[0 if hst else 2]
             else:
                 name, a = v.rows[j]
                 d = name == ".." or isdir(a)
-                size = "" if d else human(a.get("size"))
-                if w >= 56 and a and a.get("mtime"):  # room for the date too
-                    size = f"{size:>7}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(a['mtime']))}"
+                info = "" if d else human(a.get("size"))
+                if cw >= 56 and a and a.get("mtime"):  # room for the date too
+                    info = f"{info:>7}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(a['mtime']))}"
                 mark = "*" if name in p.marks else " "
                 text = f"{mark}{safe(name)}{'/' if d and name != '..' else ''}"
-                text = text[:w - len(size) - 2].ljust(w - len(size) - 2) + size
+                text = text[:cw - len(info) - 1].ljust(cw - len(info) - 1) + info
                 at = s.C[2] | curses.A_BOLD if mark == "*" else s.C[2 if d else 0]
-            if cursor:
+            if j == v.sel:
                 at = s.C[1] if active else at | curses.A_UNDERLINE
-            sc.addnstr(r + 1, x + i, text.ljust(w - 1), w - 1, at)
+            sc.addnstr(y + 1 + r, lx, text.ljust(cw), cw, at)
         if v.top:
-            sc.addstr(1, x + w - 2 + i, "▲", s.C[2])
+            sc.addstr(y + 1, lx + cw - 1, "▲", s.C[2])
         if v.top + n < len(v.rows):
-            sc.addstr(n, x + w - 2 + i, "▼", s.C[2])
+            sc.addstr(y + n, lx + cw - 1, "▼", s.C[2])
+
+    def status(s):  # the entry under the cursor, ls -l style: what the activity border shows
+        p = s.P
+        c = p.cur() if p.mode == "files" else None
+        if not c or not c[1]:
+            return "activity"
+        a = c[1]
+        owner = ":".join(str(a.get(k, a.get(n, "?"))) for k, n in (("user", "uid"), ("group", "gid")))
+        return " ".join(x for x in (stat.filemode(a.get("perm", 0)), owner if "uid" in a else "",
+                                    human(a.get("size")) if not isdir(a) else "", safe(c[0])) if x)
 
     def paint(s):
         sc = s.scr
         sc.erase()
         H, W = sc.getmaxyx()
+        fit = layout(H, W)
+        if fit and (len(fit[0]) == 1) != s.single:
+            s.single = len(fit[0]) == 1
+            if s.single:  # said once, and short: it shows when room is short
+                s.log.append(f"{time.strftime('%H:%M:%S')} one pane: Tab swaps")
         if s.msg:  # every message lands in the activity log: nothing vanishes on the next key
             s.log.append(f"{time.strftime('%H:%M:%S')} {s.msg}")
             s.msg = ""
-        if H < 8 or W < 40:
-            sc.addnstr(0, 0, "rshm: terminal too small", W - 1)
-            return
-        logn = 3 if H >= 18 else 1  # activity panel lines
-        n = s.n = H - 3 - logn  # rows between the borders
-        mid = s.mid = W // 2
+        if not fit:
+            return sc.addnstr(0, 0, f"rshm: terminal too small ({W}×{H}, needs {MIN_W}×{MIN_H})", W - 1)
+        rects, logn = fit
+        s.rects = [(s.focus if i is None else i, *r) for i, *r in rects]
+        A = H - 2 - logn  # the activity border's row
         try:
-            s.paint_pane(0, 0, mid, n)
-            s.paint_pane(1, mid, W - mid - 1, n)
-            sc.addnstr(n + 1, 0, "└─ activity ".ljust(mid, "─") + "┴".ljust(W - mid - 1, "─") + "┘", W, s.C[3])
+            for r in s.rects:
+                s.paint_pane(*r, W)
+            side = len(s.rects) == 2 and s.rects[1][2]  # side by side: where the separator meets the border
+            line = f"└─ {s.status()} ".ljust(W - 1, "─") + "┘"
+            if side and side < len(line) and line[side] == "─":
+                line = line[:side] + "┴" + line[side + 1:]
+            sc.addnstr(A, 0, line, W, s.C[3])
             keep = logn - bool(s.working)  # the live line, when there is one, takes the last row
             log = list(s.log)[-keep:] if keep else []
-            for i, line in enumerate(log):
-                sc.addnstr(H - 1 - len(log) - bool(s.working) + i, 0, f" {safe(line)}", W - 1, s.C[4 if "✗" in line else 3])
+            for i, ln in enumerate(log):
+                sc.addnstr(H - 1 - len(log) - bool(s.working) + i, 0, f" {safe(ln)}", W - 1, s.C[4 if "✗" in ln else 3])
             s.paint_work()
             if s.typing:
                 hint = "⏎ apply  Esc clear" if s.typing == "/" else ""

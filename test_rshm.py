@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline check of everything but the screen and ssh itself. Copies run against a real sftp-server (the binary
 OpenSSH runs server-side), talked to directly: no network, no sshd."""
-import curses, io, os, shutil, subprocess, tarfile, tempfile, tomllib, zipfile
+import curses, io, os, pwd, shutil, subprocess, tarfile, tempfile, tomllib, zipfile
 from pathlib import Path
 
 from rshm import config, edit, fs, screen, sftp, ssh, ui, view
@@ -120,7 +120,7 @@ raw = b"caf\xe9\n"
 name = raw.decode(errors="surrogateescape")
 assert sftp.pack(7, name) == b"\x00\x00\x00\x07\x00\x00\x00\x05" + raw
 rd = sftp.Reader(sftp.pack(0x80000000 | 0xF) + (1536).to_bytes(8, "big") + sftp.pack(1, 2, 0o40755, 3, 4, 1, "k", "v", 9))
-assert rd.attrs() == {"size": 1536, "perm": 0o40755, "mtime": 4} and rd.u32() == 9 and fs.isdir({"perm": 0o40755})
+assert rd.attrs() == {"size": 1536, "uid": 1, "gid": 2, "perm": 0o40755, "mtime": 4} and rd.u32() == 9 and fs.isdir({"perm": 0o40755})
 assert fs.islink({"perm": 0o120777}) and not fs.isdir({"perm": 0o120777})
 
 # screen helpers: keys, sizes; hostile names can't drive the terminal
@@ -271,9 +271,17 @@ if srv:
             raise AssertionError("a pipe was opened")
         except OSError as e:
             assert "not a regular file" in str(e)
-    for f in (R, Lo):  # permissions; listing gives the modified time; save replaces whole, keeping permissions
-        f.chmod(str(D / "b"), 0o640)
-        assert (D / "b").stat().st_mode & 0o777 == 0o640 and dict(f.listdir(str(D)))["b"]["mtime"] == int((D / "b").stat().st_mtime)
+    me, st = pwd.getpwuid(os.getuid()).pw_name, (D / "b").stat()
+    for f in (R, Lo):  # attributes: mode and owner (ids, and the names a listing shows); the modified time
+        f.chattr(str(D / "b"), {"perm": 0o640})
+        a = dict(f.listdir(str(D)))["b"]
+        assert (D / "b").stat().st_mode & 0o777 == 0o640 and a["mtime"] == int(st.st_mtime) and a["user"] == me
+        assert (a["uid"], a["gid"]) == (st.st_uid, st.st_gid)
+        f.chattr(str(D / "b"), {"uid": st.st_uid, "gid": st.st_gid})  # the owner it has: allowed for anyone
+        if os.getuid() == 0:  # root: hand it over, and back
+            f.chattr(str(D / "b"), {"gid": 1})
+            assert (D / "b").stat().st_gid == 1 and (D / "b").stat().st_uid == st.st_uid
+            f.chattr(str(D / "b"), {"uid": st.st_uid, "gid": st.st_gid})
         fs.save(f, str(D / "b"), b"saved\n" * 10000)
         assert (D / "b").read_bytes() == b"saved\n" * 10000 and (D / "b").stat().st_mode & 0o777 == 0o640
         fs.save(f, str(D / "b"), b"")
@@ -319,6 +327,12 @@ except OSError as e:
     assert "not an archive" in str(e)
 
 assert screen.bar(" /a/long/path", " keys ", 14) == "…g/path keys " and screen.bar(" t", " k ", 10) == " t     k "
+# layout: side by side; stacked when the terminal stands upright (a cell is about twice as tall as wide);
+# one pane when two don't fit; nothing below the least size
+side, stack = ui.layout(30, 120), ui.layout(40, 60)
+assert [r[2] for r in side[0]] == [0, 60] and [r[1] for r in stack[0]] == [0, 17] and side[1] == stack[1] == 3
+assert ui.layout(8, 44)[0] == [(None, 0, 0, 5, 44)] and ui.layout(5, 80) is None and ui.layout(30, 19) is None
+assert ui.layout(10, 100)[0][1][2] == 50 and ui.layout(12, 30)[0][1][1] == 4 and len(ui.layout(7, 30)[0]) == 1  # each falls back to the other, then to one
 # viewer: hex rows, wrap, search (forward, backward, wrapping round)
 assert view.hexrow(b"AB\x00" + bytes(range(20)), 0).startswith("00000000  41 42 00 00 01 02 03 04  05 06")
 assert view.hexrow(b"AB\x00", 0).endswith("|AB.|") and view.hexrow(bytes(17), 1).startswith("00000010  00 ")
