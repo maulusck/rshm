@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-import curses, os, shutil, subprocess, tempfile, tomllib, rshm
+"""Offline check of everything but the screen and ssh itself. Copies run against a real sftp-server (the binary
+OpenSSH runs server-side), talked to directly: no network, no sshd."""
+import curses, io, os, shutil, subprocess, tarfile, tempfile, tomllib, zipfile
 from pathlib import Path
 
+from rshm import config, edit, fs, screen, sftp, ssh, ui, view
+
 # config: a host is an ssh destination; a table is a group; a list is a group of destinations named as themselves
-h = rshm.tree(tomllib.loads("""
+h = config.tree(tomllib.loads("""
 [hosts]
 solo = "me@solo"
 lab = ["pi", "box"]
@@ -11,72 +15,88 @@ lab = ["pi", "box"]
 web = "deploy@web.example.com"
 db = { host = "db", path = "/srv/db" }
 """)["hosts"])
-assert rshm.tree(tomllib.loads(rshm.SAMPLE)["hosts"]) == {"localhost": {"host": "localhost"}}
-rows = list(rshm.flat(h, set()))
+sample = tomllib.loads(config.SAMPLE)
+assert config.tree(sample["hosts"]) == {"localhost": {"host": "localhost"}} and "{names}" in config.table(sample, "commands")["disk usage"]
+assert config.table({"commands": {"a": "x", "b": 3}}, "commands") == {"a": "x"} and config.table({"commands": "j"}, "commands") == {}
+
+# tools: your [tools] choice, else the environment's ($VISUAL before $EDITOR), else None: rshm's own
+for v in ("VISUAL", "EDITOR", "PAGER"):
+    os.environ.pop(v, None)
+assert config.tool({}, "edit") is None and config.tool({}, "view") is None
+os.environ["EDITOR"], os.environ["PAGER"] = "vi", "less"
+assert config.tool({}, "edit") == "vi" and config.tool({}, "view") == "less"
+os.environ["VISUAL"] = "code -w"
+assert config.tool({}, "edit") == "code -w" and config.tool({"tools": {"edit": "nvim"}}, "edit") == "nvim"
+for v in ("VISUAL", "EDITOR", "PAGER"):
+    os.environ.pop(v)
+assert config.cmdline("nvim", "/a b") == "nvim '/a b'" and config.cmdline("bat {file} | less", "x") == "bat x | less"
+op = {"open": {"*.pdf": "zathura", "*.7z *.RAR": "7z l {file}"}}  # [open]: first match, any case
+assert config.opener(op, "A.PDF") == "zathura" and config.opener(op, "x.rar") == "7z l {file}" and not config.opener(op, "x.txt")
+rows = list(config.flat(h, set()))
 names = lambda rs: [r[1] for r in rs]
 assert names(rows) == ["solo", "lab", "pi", "box", "prod", "web", "db"]
 assert h["lab"] == {"pi": {"host": "pi"}, "box": {"host": "box"}} and h["prod"]["db"]["path"] == "/srv/db"
-assert names(rshm.flat(h, {("lab",)})) == ["solo", "lab", "prod", "web", "db"]
-assert rshm.tree({"web": 5, "g": {"x": []}, "l": ["ok", 3]}) == {"web": {}, "g": {"x": {}}, "l": {"ok": {"host": "ok"}}}  # no crash
+assert names(config.flat(h, {("lab",)})) == ["solo", "lab", "prod", "web", "db"]
+assert config.tree({"web": 5, "g": {"x": []}, "l": ["ok", 3]}) == {"web": {}, "g": {"x": {}}, "l": {"ok": {"host": "ok"}}}
 H = {r[1]: r[2] for r in rows if r[2]}
 
 # filter: group name, host name or destination; "" keeps all
-assert names(r for r in rows if rshm.match(r, "")) == names(rows)
-assert names(r for r in rows if rshm.match(r, "deploy@")) == ["web"]
+assert names(r for r in rows if config.match(r, "")) == names(rows)
+assert names(r for r in rows if config.match(r, "deploy@")) == ["web"]
 
-# rshm HOST: exact name, group/name, then unique substring
-paths = lambda q, **k: [p for p, _ in rshm.find(h, q, **k)]
+# rshm HOST: exact name, group/name, then substring
+paths = lambda q: ["/".join(p) for p, _ in config.find(h, q)]
 assert paths("web") == ["prod/web"] and paths("lab/pi") == ["lab/pi"] and paths("DB") == ["prod/db"]
-assert paths("lab") == ["lab/pi", "lab/box"] and paths("nope") == [] and paths("we", fuzzy=False) == []
+assert paths("lab") == ["lab/pi", "lab/box"] and paths("nope") == [] and paths("we") == ["prod/web"]
 
-# ssh argv: ssh config does user/key/jump; rshm adds only its master and timeouts, exactly once (ssh keeps the first)
-a = rshm.argv(H["web"], batch=True, timeout=3)
+# ssh argv: the ssh config does user/key/jump; rshm adds only its master and timeouts, once (ssh keeps the first)
+a = ssh.argv(H["web"], batch=True, timeout=3)
 assert a[0] == "ssh" and "BatchMode=yes" in a and [o for o in a if o.startswith("ConnectTimeout")] == ["ConnectTimeout=3"]
 assert not [o for o in a if o.startswith(("User", "Port", "IdentityFile", "ProxyCommand"))]
-assert rshm.sshcmd(H["web"], d="/s rv")[-3:] == ["-t", "deploy@web.example.com", "cd '/s rv'; exec \"${SHELL:-sh}\" -l"]
-# one master per destination, its socket path short enough for a unix socket
-cp = lambda x: next(o for o in rshm.argv(x) if o.startswith("ControlPath="))
+cp = lambda x: next(o for o in ssh.argv(x) if o.startswith("ControlPath="))  # one master per destination, short path
 assert cp(H["web"]) != cp(H["db"]) and cp(H["web"]) == cp({"host": "deploy@web.example.com"})
 assert len(cp(H["web"])) - len("ControlPath=") - len(str(Path.home())) == len("/.ssh/rshm-") + 16
+r = fs.Remote(H["web"], None, None)
+r.login = lambda: None
+assert r.run("ls", "/s rv")[0][-3:] == ["-t", "deploy@web.example.com", "cd '/s rv' && ls"]
+assert fs.Local().run("ls", "/tmp") == (["sh", "-c", "ls"], "/tmp")
 
 # network failures (retry, don't prompt) vs refusals (a terminal login may help), as OpenSSH words them
 for e in ("ssh: connect to host x port 22: Connection refused", "Connection to 127.0.0.1 port 2400 timed out",
           "kex_exchange_identification: Connection closed by remote host", "Connection closed by UNKNOWN port 65535",
           "ssh: Could not resolve hostname nope: Name or service not known", "read: Connection reset by peer"):
-    assert rshm.unreachable(e), e
+    assert ssh.unreachable(e), e
 for e in ("bob@x: Permission denied (publickey,password).", "Host key verification failed."):
-    assert not rshm.unreachable(e), e
+    assert not ssh.unreachable(e), e
 
-# config file: created with the sample the first time, read back as is
+# config file: created with the sample the first time; saved atomically, 600, a symlinked one stays a symlink
 d = Path(tempfile.mkdtemp())
-assert rshm.read(d / "new" / "rshm.toml")["theme"] == "default" and (d / "new" / "rshm.toml").read_text() == rshm.SAMPLE
-
-# config save: atomic, 600, and a symlinked config (dotfile repo) stays a symlink
+assert config.read(d / "new" / "rshm.toml") == {} and not (d / "new").exists()  # no config: fine, and nothing written
+config.create(d / "new" / "rshm.toml")  # only when asked: the sample, private
+assert (d / "new" / "rshm.toml").read_text() == config.SAMPLE and (d / "new" / "rshm.toml").stat().st_mode & 0o777 == 0o600
+(d / "gen.toml").write_text('[hosts]\ns1 = ["nmt-s1", "it-s1"]\nmine = "theirs"\n')  # include: generated hosts join
+(d / "inc.toml").write_text('include = ["gen.toml"]\n[tools]\nedit = "nvim"\n[hosts]\nmine = "me"\n')
+inc = config.read(d / "inc.toml")
+assert inc["hosts"] == {"s1": ["nmt-s1", "it-s1"], "mine": "me"} and inc["tools"] == {"edit": "nvim"}
+os.environ["XDG_CONFIG_HOME"] = str(d)
+assert config.locate() == d / "rshm.toml"
+del os.environ["XDG_CONFIG_HOME"]
 real = d / "dotfiles" / "rshm.toml"
 real.parent.mkdir()
 real.write_text("old")
 (d / "link.toml").symlink_to(real)
-rshm.save(d / "link.toml", "theme = 'x'\n")
+config.save(d / "link.toml", "theme = 'x'\n")
 assert (d / "link.toml").is_symlink() and real.read_text() == "theme = 'x'\n" and real.stat().st_mode & 0o777 == 0o600
-assert not list(real.parent.glob(".*rshm-tmp"))
 replace, os.replace = os.replace, lambda *_: (_ for _ in ()).throw(OSError("disk full"))
 try:
-    rshm.save(real, "never")
+    config.save(real, "never")
     raise AssertionError("save didn't fail")
 except OSError:
     assert real.read_text() == "theme = 'x'\n" and not list(real.parent.glob(".*rshm-tmp"))  # old file intact, no litter
 finally:
     os.replace = replace
-
-# the local folder vanishing underneath us: fall back to home, never crash
-gone = Path(tempfile.mkdtemp())
-os.chdir(gone)
-gone.rmdir()
-assert rshm.lcwd() == str(Path.home())
-
-# theme save: only the value changes, comment kept, either quote style, added when missing
-for src in ('theme = "amber"   # c\n[hosts]', "theme='amber' # c\n[hosts]", "[hosts]"):
-    out = rshm.retheme(src, "matrix")
+for src in ('theme = "amber"   # c\n[hosts]', "theme='amber' # c\n[hosts]", "[hosts]"):  # only the value changes
+    out = config.retheme(src, "matrix")
     assert tomllib.loads(out)["theme"] == "matrix" and out.count("theme") == 1 and ("# c" in out) == ("# c" in src)
 
 # ssh config import: aliases (several per line, key=value, quotes), Includes (relative, glob, cycles), no patterns
@@ -84,77 +104,97 @@ for src in ('theme = "amber"   # c\n[hosts]', "theme='amber' # c\n[hosts]", "[ho
 (d / "config").write_text('Host web db\n  HostName x\nhost=jump\nHost *.corp !bad "q a"\nInclude conf.d/*.conf config\n')
 (d / "conf.d" / "a.conf").write_text("Host inner\n  ProxyJump jump\nMatch host foo\nHost web\nInclude b.conf\n")
 (d / "b.conf").write_text("Host nested\n")  # a relative Include is relative to ~/.ssh, wherever it appears
-rshm.SSH_CONFIG = d / "config"
-assert rshm.ssh_hosts(d / "config") == ["web", "db", "jump", "q a", "inner", "nested"]
+config.SSH_CONFIG = d / "config"
+assert config.ssh_hosts(d / "config") == ["web", "db", "jump", "q a", "inner", "nested"]
 (d / "b.conf").unlink()  # live group: aliases not already listed in rshm's own config
-lh = rshm.hosts({"hosts": {"mine": "web", "g": ["jump"]}})
+lh = config.hosts({"hosts": {"mine": "web", "g": ["jump"]}})
 assert lh["~/.ssh/config"] == {"db": {"host": "db"}, "q a": {"host": "q a"}, "inner": {"host": "inner"}}
-assert [p for p, _ in rshm.find(lh, "inner")] == ["~/.ssh/config/inner"]
-rshm.SSH_CONFIG = d / "missing"
-assert rshm.hosts({}) == {} and rshm.hosts({"hosts": "junk"}) == {}
+assert [p for p, _ in config.find(lh, "inner")] == [("~/.ssh/config", "inner")]
+config.SSH_CONFIG = d / "missing"
+assert config.hosts({}) == {} and config.hosts({"hosts": "junk"}) == {}
+hs = config.hosts({"hosts": {"g": {"s": "me@x"}}})  # string hosts become tables once: per-host state survives
+assert [x for *_, x, _ in config.flat(hs, set()) if x][0] is [x for *_, x, _ in config.flat(hs, set()) if x][0]
 
 # SFTP wire format: raw (non-UTF-8) names round-trip; attrs skip what they don't use
 raw = b"caf\xe9\n"
 name = raw.decode(errors="surrogateescape")
-assert rshm.pack(7, name) == b"\x00\x00\x00\x07\x00\x00\x00\x05" + raw
-r = rshm.Reader(rshm.pack(0x80000000 | 0xF) + (1536).to_bytes(8, "big") + rshm.pack(1, 2, 0o40755, 3, 4, 1, "k", "v", 9))
-assert r.attrs() == {"size": 1536, "perm": 0o40755} and r.u32() == 9 and rshm.isdir({"perm": 0o40755})
-assert rshm.islink({"perm": 0o120777}) and not rshm.isdir({"perm": 0o120777})
+assert sftp.pack(7, name) == b"\x00\x00\x00\x07\x00\x00\x00\x05" + raw
+rd = sftp.Reader(sftp.pack(0x80000000 | 0xF) + (1536).to_bytes(8, "big") + sftp.pack(1, 2, 0o40755, 3, 4, 1, "k", "v", 9))
+assert rd.attrs() == {"size": 1536, "perm": 0o40755, "mtime": 4} and rd.u32() == 9 and fs.isdir({"perm": 0o40755})
+assert fs.islink({"perm": 0o120777}) and not fs.isdir({"perm": 0o120777})
 
-# $EDITOR/$PAGER with flags; unset or empty falls back to the classic instead of running the file
-os.environ["EDITOR"], os.environ["PAGER"] = "code -w", ""
-assert rshm.editor("EDITOR") == ["code", "-w"] and rshm.editor("PAGER") == ["less"]
-del os.environ["EDITOR"]
-assert rshm.editor("EDITOR") == ["vi"]
+# screen helpers: keys, sizes; hostile names can't drive the terminal
+assert ui.codes("x Del") == [ord("x"), curses.KEY_DC] and 10 in ui.codes("⏎") and ui.codes("F5 c") == [curses.KEY_F5, 99]
+assert [screen.human(n) for n in (None, 0, 1023, 1536, 5 * 1024 ** 5)] == ["", "0B", "1023B", "1.5K", "5120.0T"]
+assert screen.safe("a\x1b[2Jb\nc" + name) == "a?[2Jb?ccaf??"
+gone = Path(tempfile.mkdtemp())  # the local folder vanishing underneath us: home, never a crash
+os.chdir(gone)
+gone.rmdir()
+assert ui.lcwd() == str(Path.home())
 
-# display: keys, sizes, and hostile names can't drive the terminal
-assert rshm.codes("x Del") == [ord("x"), curses.KEY_DC] and 10 in rshm.codes("⏎") and rshm.codes("m ?") == [109, 63]
-assert [rshm.human(n) for n in (None, 0, 1023, 1536, 5 * 1024 ** 5)] == ["", "0B", "1023B", "1.5K", "5120.0T"]
-assert rshm.safe("a\x1b[2Jb\nc" + name) == "a?[2Jb?ccaf??"
+# one key table: every action exists, no key bound twice in a view; the F-key bar and --help come from it
+for mode in ("files", "hosts"):
+    bound = [c for keys, _, m in ui.KEYS[mode] + ui.KEYS["both"] if m for c in ui.codes(keys)]
+    assert len(bound) == len(set(bound)), mode
+assert all(callable(getattr(ui.App, m, None)) for rows in ui.KEYS.values() for _, _, m in rows if m)
+assert ui.fbar(ui.KEYS["files"] + ui.KEYS["both"]) == \
+    "F1 help  F2 menu  F3 view  F4 edit  F5 copy  F6 move  F7 new  F8 delete  F9 hosts  F10 quit"
+assert "copy to the other pane" in ui.keys_help() and "F8 x Del" in ui.keys_help()
 
-# one key table: every action exists, no key is bound twice in a pane
-for pane in ("hosts", "files"):
-    bound = [c for keys, _, m in rshm.KEYS[pane] + rshm.KEYS["both"] if m for c in rshm.codes(keys)]
-    assert len(bound) == len(set(bound)), pane
-assert all(hasattr(rshm.App, m) for rows in rshm.KEYS.values() for _, _, m in rows if m)
-assert "download" in rshm.keys_help() and "x Del" in rshm.keys_help()
+# panes: the host list starts folded with this machine on top; filters are per view; `rshm y` unfolds around y
+G = config.tree({"top": "me@top", "g": {"x": "me@x", "sub": {"y": "me@y"}}})
+assert config.groups(G) == {("g",), ("g", "sub")}
+app = ui.App.__new__(ui.App)
+app.hosts, app.panes, app.focus, app.order, app.dots = G, [ui.Pane(), ui.Pane()], 0, "name", True
+p = app.panes[0]
+p.closed, p.items = config.groups(G), [("..", None), ("x.log", {"size": 1}), ("y.txt", {"size": 2})]
+app.sync(p)
+assert names(p.hostv.rows) == ["local", "top", "g"] and p.hostv.rows[0][2] is ui.LOCAL
+p.hostv.flt = "y"
+app.sync(p)
+assert names(p.hostv.rows) == ["y"] and [r[0] for r in p.files.rows] == ["..", "x.log", "y.txt"]
+p.hostv.flt, p.files.flt = "", "log"
+app.sync(p)
+assert names(p.hostv.rows) == ["local", "top", "g"] and [r[0] for r in p.files.rows] == ["..", "x.log"]
+app.pick(p, ("g", "sub", "y"))
+assert p.hostv.rows[p.hostv.sel][1] == "y" and p.closed == set()
+p.mode, p.files.flt = "files", ""
+app.sync(p)
+p.files.sel = 0
+assert p.targets() == []  # .. is never acted on
+p.marks = {"y.txt"}
+assert p.targets() == [("y.txt", {"size": 2})]
+p.items = [("..", None), ("b", {"size": 1, "mtime": 2}), (".h", {"size": 9, "mtime": 1}), ("a", {"size": 5, "mtime": 3}),
+           ("d", {"perm": 0o40755})]  # folders first, then by name, size or date; dotfiles can hide
+for order, want in (("name", "d .h a b"), ("size", "d .h a b"), ("date", "d a b .h")):
+    app.order = order
+    app.sync(p)
+    assert [r[0] for r in p.files.rows] == ["..", *want.split()], order
+app.dots = False
+app.sync(p)
+assert [r[0] for r in p.files.rows] == ["..", "d", "a", "b"]
 
-# the tree starts folded: every group, nested ones too; hosts outside any group stay visible
-G = rshm.tree({"top": "me@top", "g": {"x": "me@x", "sub": {"y": "me@y"}}})
-assert rshm.groups(G) == {("g",), ("g", "sub")}
-assert names(rshm.flat(G, rshm.groups(G))) == ["top", "g"]
-
-# each pane filters on its own: a hosts filter never hides files, and the other way round
-app = rshm.App.__new__(rshm.App)
-app.hosts, app.closed, app.files, app.flt = G, rshm.groups(G), ["../", "x.log", "y.txt"], ["y", ""]
-app.sync()
-assert [r[1] for r in app.rows] == ["y"] and app.shown == ["../", "x.log", "y.txt"]
-app.flt = ["", "log"]
-app.sync()
-assert [r[1] for r in app.rows] == ["top", "g"] and app.shown == ["../", "x.log"]
-
-# string hosts become tables once, so per-host state (the last folder) survives a refresh
-hs = rshm.hosts({"hosts": {"g": {"s": "me@x"}}})
-a, b = [h for *_, h, _ in rshm.flat(hs, set()) if h], [h for *_, h, _ in rshm.flat(hs, set()) if h]
-assert a[0] is b[0] and a[0] == {"host": "me@x"}
-
-# SFTP transfers against a real sftp-server (the binary OpenSSH runs server-side), no network needed
+# copies between any two file systems: local, and a host (a real sftp-server); resumed, permissions kept
 srv = next((x for x in (shutil.which("sftp-server"), "/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server",
                         "/usr/libexec/sftp-server") if x and os.path.exists(x)), None)
 if srv:
-    s = rshm.SFTP.__new__(rshm.SFTP)
-    s.err, s.n, s.early, s.ext = tempfile.TemporaryFile(), 0, {}, set()
-    s.p = subprocess.Popen([srv], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=s.err)
-    s.init()
-    L, R = d / "local", d / "remote"
+    def session():  # an SFTP session straight to sftp-server, as ssh would hand it over
+        x = sftp.SFTP.__new__(sftp.SFTP)
+        x.err, x.n, x.early, x.ext = tempfile.TemporaryFile(), 0, {}, set()
+        x.p = subprocess.Popen([srv], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=x.err)
+        return x.init()
+    R, Lo = fs.Remote({"host": "test"}, None, None), fs.Local()
+    R.sf = s = session()
+    L, D = d / "local", d / "remote"
     (L / "sub").mkdir(parents=True)
-    R.mkdir()
+    D.mkdir()
     big = os.urandom(5 * 1024 * 1024 + 123)
     (L / "big.bin").write_bytes(big)
     (L / "sub" / "x.txt").write_text("x")
     (L / "loop").symlink_to(L)  # a link loop and a dangling link: both skipped, neither hangs nor fails
     (L / "gone").symlink_to(d / "nowhere")
     os.mkfifo(L / "pipe")  # a named pipe would block forever if opened: never touched
+
     def ticker():  # the App's ticker contract: tick(path, position, resumed); .done and .finished
         def tick(path, at, resumed=False):
             tick.log.append((path, at, resumed))
@@ -162,65 +202,159 @@ if srv:
         tick.log, tick.pos, tick.done, tick.finished = [], {}, 0, set()
         return tick
     seen = ticker()
-    rshm.send(s, str(L), str(R / "t"), seen)
-    assert (R / "t" / "big.bin").read_bytes() == big and (R / "t" / "sub" / "x.txt").read_text() == "x"
-    assert seen.done == len(big) + 1 and not (R / "t" / "loop").exists() and not (R / "t" / "gone").exists()
-    rshm.send(s, str(L), str(R / "t"), seen)  # a reconnect re-walks the tree: finished files aren't sent again
-    assert seen.done == len(big) + 1 and len(seen.finished) == 2
-    assert not list(R.rglob("*" + rshm.PART))  # every file renamed into place
-    # replacing keeps permissions; download resumes a partial and restarts a bogus one
-    os.chmod(R / "t" / "sub" / "x.txt", 0o600)
+    fs.copy(Lo, str(L), R, str(D / "t"), seen)  # local -> host
+    assert (D / "t" / "big.bin").read_bytes() == big and (D / "t" / "sub" / "x.txt").read_text() == "x"
+    assert seen.done == len(big) + 1 and not (D / "t" / "loop").exists() and not (D / "t" / "gone").exists()
+    fs.copy(Lo, str(L), R, str(D / "t"), seen)  # a reconnect re-walks the tree: finished files aren't sent again
+    assert seen.done == len(big) + 1 and len(seen.finished) == 2 and not list(D.rglob("*" + fs.PART))
+    os.chmod(D / "t" / "sub" / "x.txt", 0o600)  # replacing keeps the target's permissions
     (L / "sub" / "x.txt").write_text("new")
-    rshm.send(s, str(L / "sub" / "x.txt"), str(R / "t" / "sub" / "x.txt"), ticker())
-    assert (R / "t" / "sub" / "x.txt").read_text() == "new" and (R / "t" / "sub" / "x.txt").stat().st_mode & 0o777 == 0o600
-    got = ticker()
-    (d / ("dl" + rshm.PART)).write_bytes(big[:1_000_000])
-    rshm.fetch(s, str(R / "t" / "big.bin"), str(d / "dl"), got)
+    fs.copy(Lo, str(L / "sub" / "x.txt"), R, str(D / "t" / "sub" / "x.txt"), ticker())
+    assert (D / "t" / "sub" / "x.txt").read_text() == "new" and (D / "t" / "sub" / "x.txt").stat().st_mode & 0o777 == 0o600
+    got = ticker()  # host -> local resumes a partial, never counting resumed bytes twice; restarts a bogus one
+    (d / ("dl" + fs.PART)).write_bytes(big[:1_000_000])
+    fs.copy(R, str(D / "t" / "big.bin"), Lo, str(d / "dl"), got)
     assert (d / "dl").read_bytes() == big and got.log[0][1:] == (1_000_000, True) and got.done == len(big)
-    (d / ("dl" + rshm.PART)).write_bytes(big[:3_000_000])  # a retry of the same file: resumed bytes are never counted twice
-    got.finished.clear()
-    rshm.fetch(s, str(R / "t" / "big.bin"), str(d / "dl"), got)
-    assert got.done == len(big)
-    (d / ("dl2" + rshm.PART)).write_bytes(b"z" * (len(big) + 5))
-    rshm.fetch(s, str(R / "t" / "big.bin"), str(d / "dl2"), ticker())
+    (d / ("dl2" + fs.PART)).write_bytes(b"z" * (len(big) + 5))
+    fs.copy(R, str(D / "t" / "big.bin"), Lo, str(d / "dl2"), ticker())
     assert (d / "dl2").read_bytes() == big
-    # upload resumes a partial .part; a remote .part that isn't a prefix length restarts
-    (R / "t" / ("up.bin" + rshm.PART)).write_bytes(big[:2_000_000])
-    rshm.send(s, str(L / "big.bin"), str(R / "t" / "up.bin"), ticker())
-    assert (R / "t" / "up.bin").read_bytes() == big and b"posix-rename@openssh.com" in s.ext
-    # downloads keep the remote permissions (owner-writable); an upload onto a symlink writes through it
-    os.chmod(R / "t" / "sub" / "x.txt", 0o750)
-    rshm.fetch(s, str(R / "t" / "sub" / "x.txt"), str(d / "perm"), ticker())
+    (D / "t" / ("up.bin" + fs.PART)).write_bytes(big[:2_000_000])  # local -> host resumes too
+    fs.copy(Lo, str(L / "big.bin"), R, str(D / "t" / "up.bin"), ticker())
+    assert (D / "t" / "up.bin").read_bytes() == big and b"posix-rename@openssh.com" in s.ext
+    fs.copy(R, str(D / "t"), R, str(D / "t2"), ticker())  # within one host: the server copies by itself
+    assert (D / "t2" / "big.bin").read_bytes() == big and b"copy-data" in s.ext
+    shutil.rmtree(D / "t2")
+    R2 = fs.Remote({"host": "test"}, None, None)  # a server without that: a second session reads
+    R2.sf = session()
+    R2.sf.ext.discard(b"copy-data")
+    R2.twin = lambda: (lambda x: setattr(x, "sf", session()) or x)(fs.Remote({"host": "test"}, None, None))
+    fs.copy(R2, str(D / "t"), R2, str(D / "t2"), ticker())
+    R2.close()
+    assert (D / "t2" / "big.bin").read_bytes() == big and (D / "t2" / "sub" / "x.txt").read_text() == "new"
+    fs.copy(Lo, str(L / "sub"), Lo, str(d / "lsub"), ticker())  # local -> local
+    assert (d / "lsub" / "x.txt").read_text() == "new"
+    os.chmod(D / "t" / "sub" / "x.txt", 0o750)  # downloads keep the source permissions (less umask)
+    fs.copy(R, str(D / "t" / "sub" / "x.txt"), Lo, str(d / "perm"), ticker())
     assert (d / "perm").stat().st_mode & 0o777 == 0o750 & ~os.umask(os.umask(0))
-    (R / "t" / "ln").symlink_to("sub/x.txt")
+    (D / "t" / "ln").symlink_to("sub/x.txt")  # a copy onto a symlink writes through it, like cp
     (L / "sub" / "x.txt").write_text("thru")
-    rshm.send(s, str(L / "sub" / "x.txt"), str(R / "t" / "ln"), ticker())
-    assert (R / "t" / "ln").is_symlink() and (R / "t" / "sub" / "x.txt").read_text() == "thru"
-    assert (R / "t" / "sub" / "x.txt").stat().st_mode & 0o777 == 0o750
-    # a stray user file named like a partial is not ours: never spliced in, never removed
-    (R / "t" / "x.part").write_text("MYDATA")
-    rshm.send(s, str(L / "sub" / "x.txt"), str(R / "t" / "x"), ticker())
-    assert (R / "t" / "x").read_text() == "thru" and (R / "t" / "x.part").read_text() == "MYDATA"
-    # a recursive delete
-    rshm.send(s, str(L / "sub"), str(R / "t" / "del"), ticker())
-    s.rm(str(R / "t" / "del"))
-    assert not (R / "t" / "del").exists()
-    # remote tree back down, with a remote link loop in it
-    (R / "t" / "rloop").symlink_to(R / "t")
-    (R / "t" / "rgone").symlink_to(d / "nowhere")
-    os.mkfifo(R / "t" / "rpipe")
-    rshm.fetch(s, str(R / "t"), str(d / "back"), ticker())
-    assert (d / "back" / "big.bin").read_bytes() == big and not (d / "back" / "rloop").exists() and not (d / "back" / "rgone").exists()
-    assert not (d / "back" / "rpipe").exists() and not (R / "t" / "pipe").exists()
-    for bad in (lambda: rshm.fetch(s, str(R / "t" / "rpipe"), str(d / "p"), ticker()),
-                lambda: rshm.send(s, str(L / "pipe"), str(R / "p"), ticker())):
+    fs.copy(Lo, str(L / "sub" / "x.txt"), R, str(D / "t" / "ln"), ticker())
+    assert (D / "t" / "ln").is_symlink() and (D / "t" / "sub" / "x.txt").read_text() == "thru"
+    (D / "t" / "x.part").write_text("MYDATA")  # a user file named like a partial is not ours: never touched
+    fs.copy(Lo, str(L / "sub" / "x.txt"), R, str(D / "t" / "x"), ticker())
+    assert (D / "t" / "x").read_text() == "thru" and (D / "t" / "x.part").read_text() == "MYDATA"
+    for f in (R, Lo):  # recursive delete, on either side; a link inside is removed, never followed
+        (D / "t2").mkdir(exist_ok=True)
+        (D / "t2" / "out").symlink_to(L)
+        fs.rm(f, str(D / "t2"))
+        assert not (D / "t2").exists() and (L / "big.bin").exists()
+    for f in (R, Lo):  # rename: replaces by default, refuses when told not to
+        (D / "a").write_text("a")
+        (D / "b").write_text("b")
+        try:
+            f.rename(str(D / "a"), str(D / "b"), replace=False)
+            raise AssertionError("rename overwrote")
+        except OSError:
+            pass
+        f.rename(str(D / "a"), str(D / "b"))
+        assert (D / "b").read_text() == "a" and not (D / "a").exists()
+    (D / "t" / "rloop").symlink_to(D / "t")  # a host tree back down, with a link loop, a dangling link, a pipe
+    (D / "t" / "rgone").symlink_to(d / "nowhere")
+    os.mkfifo(D / "t" / "rpipe")
+    fs.copy(R, str(D / "t"), Lo, str(d / "back"), ticker())
+    assert (d / "back" / "big.bin").read_bytes() == big and not (d / "back" / "rloop").exists()
+    assert not (d / "back" / "rgone").exists() and not (d / "back" / "rpipe").exists() and not (D / "t" / "pipe").exists()
+    for bad in (lambda: fs.copy(R, str(D / "t" / "rpipe"), Lo, str(d / "p"), ticker()),
+                lambda: fs.copy(Lo, str(L / "pipe"), R, str(D / "p"), ticker())):
         try:
             bad()
             raise AssertionError("a pipe was opened")
         except OSError as e:
             assert "not a regular file" in str(e)
+    for f in (R, Lo):  # permissions; listing gives the modified time; save replaces whole, keeping permissions
+        f.chmod(str(D / "b"), 0o640)
+        assert (D / "b").stat().st_mode & 0o777 == 0o640 and dict(f.listdir(str(D)))["b"]["mtime"] == int((D / "b").stat().st_mtime)
+        fs.save(f, str(D / "b"), b"saved\n" * 10000)
+        assert (D / "b").read_bytes() == b"saved\n" * 10000 and (D / "b").stat().st_mode & 0o777 == 0o640
+        fs.save(f, str(D / "b"), b"")
+        assert (D / "b").read_bytes() == b"" and not list(D.glob("*" + fs.PART))
     s.close()
+    assert not R.alive()  # a dropped session: a transfer retries, and the next use reopens it
 else:
-    print("(no sftp-server here: transfer tests skipped)")
+    print("(no sftp-server here: copy tests skipped)")
 
+# archives: zip and tar.gz browse like folders, read-only; files copy out byte for byte, folders implied by paths too
+z = d / "a.zip"
+with zipfile.ZipFile(z, "w") as zf:
+    zf.writestr("top.txt", "top")
+    zf.writestr("deep/er/x.bin", bytes(range(256)) * 300)
+tz = d / "a.tar.gz"
+with tarfile.open(tz, "w:gz") as tf:
+    for n, data in (("top.txt", b"top"), ("deep/er/x.bin", bytes(range(256)) * 300)):
+        ti = tarfile.TarInfo(n)
+        ti.size, ti.mode = len(data), 0o640
+        tf.addfile(ti, io.BytesIO(data))
+for path in (z, tz):
+    ar = fs.Archive(str(path), "x")
+    assert sorted(n for n, _ in ar.listdir("/")) == ["deep", "top.txt"] and fs.isdir(ar.stat("/deep/er"))
+    assert ar.realpath("") == "/" and ar.realpath("/deep/../top.txt") == "/top.txt"
+    out = d / f"out-{path.name}"
+    tick = lambda *a, **k: None
+    tick.finished = set()
+    fs.copy(ar, "/", fs.Local(), str(out), tick)
+    assert (out / "deep" / "er" / "x.bin").read_bytes() == bytes(range(256)) * 300 and (out / "top.txt").read_text() == "top"
+    assert b"".join(ar.read("/deep/er/x.bin", 1000, 76800)) == (bytes(range(256)) * 300)[1000:]
+    for bad in (lambda: ar.mkdir("/n"), lambda: ar.unlink("/top.txt"), lambda: fs.save(ar, "/top.txt", b"x")):
+        try:
+            bad()
+            raise AssertionError("an archive was written")
+        except OSError as e:
+            assert "read-only" in str(e)
+    ar.close()
+(d / "junk.zip").write_bytes(b"not an archive")
+try:
+    fs.Archive(str(d / "junk.zip"), "junk.zip")
+    raise AssertionError("junk opened")
+except OSError as e:
+    assert "not an archive" in str(e)
+
+assert screen.bar(" /a/long/path", " keys ", 14) == "…g/path keys " and screen.bar(" t", " k ", 10) == " t     k "
+# viewer: hex rows, wrap, search (forward, backward, wrapping round)
+assert view.hexrow(b"AB\x00" + bytes(range(20)), 0).startswith("00000000  41 42 00 00 01 02 03 04  05 06")
+assert view.hexrow(b"AB\x00", 0).endswith("|AB.|") and view.hexrow(bytes(17), 1).startswith("00000010  00 ")
+assert view.rows(["abcdef", ""], 4, True) == ["abcd", "ef", ""] and view.rows(["abcdef"], 4, False) == ["abcdef"]
+rs = ["one", "Two", "three", "two"]
+assert view.find(4, rs.__getitem__, "two", 2, 1) == 3 and view.find(4, rs.__getitem__, "two", 0, 1) == 1
+assert view.find(4, rs.__getitem__, "two", 0, -1) == 3 and view.find(4, rs.__getitem__, "zz", 0, 1) is None
+
+# editor buffer: edits, undo (a run of typing is one step), find; bytes, tabs and CRLF come back exactly
+raw = b"a\tb\r\nc\xff\xfe\r\n"
+b = edit.Buffer(raw)
+assert b.nl == "\r\n" and b.data() == raw
+b.move(dy=1)
+for ch in "xy":
+    b.insert(ch)
+assert b.lines[1] == "xyc\udcff\udcfe" and (b.y, b.x) == (1, 2)
+b.newline()
+b.insert("z")
+assert b.lines[1:3] == ["xy", "zc\udcff\udcfe"]
+b.backspace()
+b.backspace()  # at a line's start: joins it to the one above
+assert b.lines[1] == "xyc\udcff\udcfe" and (b.y, b.x) == (1, 2)
+b.move(dx=-2)
+b.delete()
+assert b.lines[1] == "yc\udcff\udcfe"
+while b.undos:
+    b.undo()
+assert b.data() == raw and b.changed
+b = edit.Buffer(b"one\ntwo\none\n")
+assert b.find("ONE") and (b.y, b.x) == (2, 0) and b.find("one") and (b.y, b.x) == (0, 0) and not b.find("zz")
+b.move(dx=-1)  # left of the first character stays put; right of a line's end goes down
+assert (b.y, b.x) == (0, 0)
+b.move(dx=3)
+b.move(dx=1)
+assert (b.y, b.x) == (1, 0)
+assert edit.Buffer(b"").data() == b"" and edit.Buffer(b"x\n").lines == ["x", ""]
+
+shutil.rmtree(d)
 print("ok")

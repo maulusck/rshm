@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Live check against a real, throwaway sshd: a login through a jump (set up in an ssh config, as it should be),
-the live check, SFTP both ways, the CLI, and nothing left behind.
+"""Live check against a real, throwaway sshd, through a jump set up in an ssh config (as it should be): the real
+screen in a terminal (open a host, copy a file over with the keys, a shell there), a tree both ways, the live check,
+and nothing left behind.
 Runs as you on a free local port, in a temp folder that is removed afterwards. No root, no users, no network."""
-import hashlib, os, shutil, socket, subprocess, sys, tempfile, time
+import contextlib, fcntl, hashlib, os, pty, select, shutil, socket, struct, subprocess, sys, tempfile, termios, time, zipapp
+
+try:
+    import pyte  # a terminal emulator to read the real screen with (pip install pyte)
+except ImportError:
+    sys.exit("(no pyte here: live test skipped)")
 from pathlib import Path
 
 sshd = shutil.which("sshd") or next((p for p in ("/usr/sbin/sshd", "/usr/local/sbin/sshd") if os.path.exists(p)), None)
@@ -13,7 +19,7 @@ if not (sshd and sftp):
 
 T = Path(tempfile.mkdtemp(prefix="rshm-live-"))
 os.environ["HOME"] = str(T)  # rshm's config, its sockets and the ssh config all land in here
-import rshm  # noqa: E402  (after HOME is set)
+from rshm import config, fs, ssh  # noqa: E402  (after HOME is set)
 
 with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
@@ -57,45 +63,84 @@ cfg = T / "rshm.toml"
 cfg.write_text('[hosts]\nhere = ["direct", "jumped"]\n')
 sockets = lambda: sorted(p.name for p in (T / ".ssh").glob("rshm-" + "[0-9a-f]" * 16))
 try:
-    # the CLI: logs in through the jump, runs ssh, and stops its logins on the way out
-    r = subprocess.run(["rshm", "-c", cfg, "jumped"], stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                       timeout=60) if shutil.which("rshm") else None
-    if r:
-        assert r.returncode == 0, r.stderr
-        time.sleep(2)
-        assert sockets() == [], f"CLI left logins behind: {sockets()}"
-
-    # login through the jump (the ssh config's ProxyJump), no terminal needed; then the live check: a round trip
-    hs = rshm.hosts(rshm.read(cfg))
-    h = rshm.find(hs, "jumped")[0][1]
-    rshm.connect(h, term=lambda cmd: 1, say=lambda m: None)
-    assert len(sockets()) == 1, sockets()
-    assert rshm.quiet([*rshm.argv(h, batch=True, timeout=3), "jumped", "true"])[0] == 0
-
-    # SFTP through the jump: a tree up, the same tree down, byte for byte, permissions kept
-    L, R = T / "up", T / "remote"
+    # the single-file build, as you'd carry it on a USB stick: rshm.pyz with its rshm.toml beside it
+    src = Path(__file__).resolve().parent
+    zipapp.create_archive(src, T / "rshm.pyz", "/usr/bin/env python3", "rshm.__main__:main",
+                          filter=lambda p: p.parts[0] == "rshm" and p.suffix == ".py")
+    # the screen: `rshm jumped` opens it on the right (this machine on the left), through the jump
+    L = T / "up"
     (L / "sub").mkdir(parents=True)
     data = os.urandom(3 * 1024 * 1024 + 7)
     (L / "big.bin").write_bytes(data)
     (L / "sub" / "x.sh").write_text("#!/bin/sh\n")
     os.chmod(L / "sub" / "x.sh", 0o750)
+    (T / "remote").mkdir()
+    screen, raw = pyte.Screen(120, 30), []
+    stream = pyte.ByteStream(screen)
+    pid, fd = pty.fork()
+    if not pid:
+        os.chdir(L)
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))  # the size pyte draws
+        os.environ.update(TERM="xterm")
+        for v in ("EDITOR", "VISUAL", "PAGER", "XDG_CONFIG_HOME", "PYTHONPATH"):
+            os.environ.pop(v, None)
+        os.execvp(sys.executable, [sys.executable, str(T / "rshm.pyz"), "jumped"])  # finds rshm.toml next to it
+
+    def until(ok, what, wait=30):
+        t0 = time.monotonic()
+        while not ok("\n".join(screen.display)):
+            assert time.monotonic() - t0 < wait, f"{what}:\n" + "\n".join(screen.display)
+            if select.select([fd], [], [], 0.5)[0]:
+                b = os.read(fd, 65536)
+                raw.append(b)
+                stream.feed(b)
+    until(lambda s: "jumped:/" in s and "big.bin" in s, "both panes")
+    assert len(sockets()) == 1, sockets()
+    # copy with the keys: Tab to this machine, filter to the file, c (F5), a new destination, ⏎
+    for k in (b"\t", b"/big", b"\r", b"c", b"\x15" + str(T / "remote").encode(), b"\r"):
+        os.write(fd, k)
+        time.sleep(0.2)
+    until(lambda s: "✓ → big.bin" in s, "copied")
+    assert (T / "remote" / "big.bin").read_bytes() == data
+    # a shell on the host, in its folder, on the same login; exit brings the screen back
+    os.write(fd, b"\ts")
+    time.sleep(1)
+    os.write(fd, b"echo RSHM_$((1+1)); exit\n")
+    until(lambda s: b"RSHM_2" in b"".join(raw) and "F10 quit" in s and "RSHM_2" not in s, "shell, then the screen again")
+    assert len(sockets()) == 1, sockets()
+    os.write(fd, b"q")
+    with contextlib.suppress(OSError):  # read on to the end: a full terminal would hold rshm's exit up
+        while os.read(fd, 65536):
+            pass
+    assert os.waitpid(pid, 0)[1] == 0
+    time.sleep(2)
+    assert sockets() == [], f"the screen left logins behind: {sockets()}"
+
+    # a tree up through the jump and back down, byte for byte, permissions kept; a copy within the host; the live check
+    hs = config.hosts(config.read(cfg))
+    h = config.find(hs, "jumped")[0][1]
+    R, Lo = fs.Remote(h, term=lambda cmd: 1, say=lambda m: None), fs.Local()
     tick = lambda *a, **k: None
     tick.finished = set()
-    s = rshm.SFTP(h).init()
-    rshm.send(s, str(L), str(R), tick)
+    fs.copy(Lo, str(L), R, str(T / "remote" / "t"), tick)
     tick.finished = set()
-    rshm.fetch(s, str(R), str(T / "down"), tick)
-    s.close()
+    fs.copy(R, str(T / "remote" / "t"), Lo, str(T / "down"), tick)
+    tick.finished = set()
+    fs.copy(R, str(T / "remote" / "t" / "big.bin"), R, str(T / "remote" / "same.bin"), tick)  # within one host
+    fs.save(R, str(T / "remote" / "saved.txt"), b"over ssh\n")  # what the built-in editor's ^S does
+    R.close()
     sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-    assert sha(T / "down" / "big.bin") == sha(L / "big.bin") == sha(R / "big.bin")
+    assert sha(T / "down" / "big.bin") == sha(L / "big.bin") == sha(T / "remote" / "t" / "big.bin") == sha(T / "remote" / "same.bin")
+    assert (T / "remote" / "saved.txt").read_bytes() == b"over ssh\n"
     assert (T / "down" / "sub" / "x.sh").stat().st_mode & 0o777 == 0o750 & ~os.umask(os.umask(0))
-    assert not list(T.rglob("*" + rshm.PART))
+    assert not list(T.rglob("*" + fs.PART)) and len(sockets()) == 1
+    assert ssh.quiet([*ssh.argv(h, batch=True, timeout=3), "jumped", "true"])[0] == 0
 
     # nothing left behind: the logins stop, their sockets go
-    rshm.logout()
+    ssh.logout()
     time.sleep(2)
     assert sockets() == [], f"logins left behind: {sockets()}"
-    print("live ok" + ("" if r else " (rshm not installed: CLI step skipped)"))
+    print("live ok")
 finally:
     srv.terminate()
     srv.wait()

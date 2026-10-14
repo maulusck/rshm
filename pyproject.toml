@@ -1,16 +1,19 @@
 [project]
 name = "rshm"
-version = "1.0.0"
+dynamic = ["version"]
 readme = "README.md"
-description = "Remote SHell Manager: SSH hosts and SFTP in one curses screen"
+description = "Remote SHell Manager: a two-pane file manager for this machine and every host in your ~/.ssh/config"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-rshm = "rshm:main"
+rshm = "rshm.__main__:main"
 
 [tool.setuptools]
-py-modules = ["rshm"]
+packages = ["rshm"]
+
+[tool.setuptools.dynamic]
+version = { attr = "rshm.__version__" }
 
 [build-system]
 requires = ["setuptools>=61"]
