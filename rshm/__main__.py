@@ -15,7 +15,8 @@ def pyz(out):  # this very rshm as one runnable file, from wherever it runs (sou
             for r in sorted(importlib.resources.files(__package__).iterdir(), key=lambda r: r.name):
                 if r.name.endswith(".py"):
                     z.writestr(f"rshm/{r.name}", r.read_bytes())
-            z.writestr("__main__.py", "from rshm.__main__ import main\nmain()\n")
+            z.writestr("__main__.py", "import sys\nif sys.version_info < (3, 11):\n    sys.exit('rshm needs Python 3.11 or "
+                                      "newer')\nfrom rshm.__main__ import main\nmain()\n")
     tmp.chmod(0o755)
     os.replace(tmp, out)
 

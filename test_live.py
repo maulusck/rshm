@@ -4,7 +4,7 @@
 2. hosts (when sshd is here): a throwaway sshd, reached through a jump set up in an ssh config as it should be;
    open, copy with the keys, a shell, a tree both ways, a copy within the host, the live check; nothing left behind
 Runs as you, in a temp folder removed afterwards, sshd on a free local port. No root, no network, no other users."""
-import contextlib, fcntl, hashlib, os, pty, select, shutil, signal, socket, struct, subprocess, sys, tempfile, termios, time
+import contextlib, curses, fcntl, hashlib, os, pty, select, shutil, signal, socket, struct, subprocess, sys, tempfile, termios, time
 from pathlib import Path
 
 try:
@@ -37,9 +37,13 @@ class Stream(pyte.ByteStream):
     csi = {**pyte.ByteStream.csi, "S": "scroll_up", "T": "scroll_down"}
 
 
-KEY = {"F1": "\x1bOP", "F2": "\x1bOQ", "F3": "\x1bOR", "F4": "\x1bOS", "F5": "\x1b[15~", "F6": "\x1b[17~",
-       "F7": "\x1b[18~", "F8": "\x1b[19~", "F9": "\x1b[20~", "F10": "\x1b[21~", "Esc": "\x1b", "Tab": "\t", "Enter": "\r",
-       "Down": "\x1bOB", "^O": "\x0f", "^Q": "\x11", "^S": "\x13", "^U": "\x15"}  # as xterm sends them
+TERM = os.environ.get("RSHM_TERM", "xterm")  # the keys as this terminal sends them, from its terminfo
+curses.setupterm(TERM, sys.__stdout__.fileno())
+cap = lambda c: (curses.tigetstr(c) or b"").decode()
+KEY = {**{f"F{i}": cap(f"kf{i}") for i in range(1, 11)}, "Up": cap("kcuu1"), "Down": cap("kcud1"), "Right": cap("kcuf1"),
+       "Left": cap("kcub1"), "Esc": "\x1b", "Tab": "\t", "Enter": "\r", **{f"^{c}": chr(ord(c) - 64) for c in "FKOSUX"}}
+MOUSE = cap("kmous")  # "\x1b[<": SGR; "\x1b[M": X10 bytes; none: the mouse steps are skipped
+SIZES = [(1, 1), (2, 10), (3, 3), (6, 19), (7, 20), (8, 24), (24, 80), (12, 40), (40, 60), (4, 200), (60, 30), (24, 81)]
 
 
 class Term:  # one rshm in a pseudo terminal, its screen kept by pyte
@@ -50,9 +54,10 @@ class Term:  # one rshm in a pseudo terminal, its screen kept by pyte
         if not t.pid:
             os.chdir(cwd)
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-            os.environ["TERM"] = "xterm"
+            os.environ["TERM"] = TERM
             os.environ.pop("PYTHONPATH", None)
-            os.execvp(sys.executable, [sys.executable, str(T / "rshm.pyz"), *args])  # finds rshm.toml beside it
+            run = os.environ.get("RSHM_RUN", sys.executable).split()  # RSHM_RUN: a python to run it with (a tracer)
+            os.execvp(run[0], [*run, str(T / "rshm.pyz"), *args])  # finds rshm.toml beside it
 
     def text(t):
         return "\n".join(t.screen.display)
@@ -81,9 +86,17 @@ class Term:  # one rshm in a pseudo terminal, its screen kept by pyte
         os.kill(t.pid, signal.SIGWINCH)
         t.pump(0.3)
 
-    def click(t, y, x):  # xterm mouse (SGR, as this terminfo asks): press and release at a cell
-        os.write(t.fd, f"\x1b[<0;{x + 1};{y + 1}M\x1b[<0;{x + 1};{y + 1}m".encode())
+    def click(t, y, x, b=0):  # press and release at a cell (b 2: the right button), as this terminal reports it
+        os.write(t.fd, (f"\x1b[<{b};{x + 1};{y + 1}M\x1b[<{b};{x + 1};{y + 1}m" if MOUSE == "\x1b[<" else
+                        f"\x1b[M{chr(32 + b)}{chr(33 + x)}{chr(33 + y)}\x1b[M#{chr(33 + x)}{chr(33 + y)}").encode())
         t.pump()
+
+    def sweep(t, back, what):  # this screen through every size, tiny to wide, and back: alive, no error, as it was
+        for rows, cols in SIZES:
+            t.resize(rows, cols)
+        t.resize(30, 120)
+        assert os.waitpid(t.pid, os.WNOHANG) == (0, 0), f"{what}: rshm died resizing"
+        t.until(lambda s: back(s) and "ERR" not in s and "Error" not in s, f"{what}, after every size")
 
     def quit(t):
         os.write(t.fd, b"q")
@@ -93,11 +106,13 @@ class Term:  # one rshm in a pseudo terminal, its screen kept by pyte
         return os.waitpid(t.pid, 0)[1]
 
 
-log = lambda s: s.split("└─")[-1]  # the activity panel and the key bar
 try:
     # the single file, built by rshm itself, with its config beside it, as you'd carry it on a USB stick
     subprocess.run([sys.executable, "-m", "rshm", "--pyz", T / "rshm.pyz"], cwd=Path(__file__).resolve().parent, check=True)
+    for old in filter(None, map(shutil.which, ("python3.10", "python3.9"))):  # an older python says what it needs
+        assert subprocess.run([old, T / "rshm.pyz"], capture_output=True, text=True).stderr == "rshm needs Python 3.11 or newer\n"
     (T / "rshm.toml").write_text('theme = "default"\n[open]\n"*.marker" = "touch {file}.opened"\n'
+                                 f'"*.lnk" = "cp {{file}} {T}/got.txt"\n'
                                  '[commands]\n"say hi" = "echo hi {names} > {dir}/menu.out"\n'
                                  '[hosts]\nhere = ["direct", "jumped"]\n')
 
@@ -109,61 +124,139 @@ try:
     (B / "mv.txt").write_text("move me")
     (B / ".dot").write_text("hidden")
     (B / "m.marker").write_text("")
+    (B / "sub" / "deep.txt").write_text("deep")
     with __import__("zipfile").ZipFile(B / "data.zip", "w") as z:
         z.writestr("inside/a.txt", "A" * 300)
     t = Term([], B)
-    t.until(lambda s: "local:" in s and "note.txt" in s and "hosts" in s, "this machine left, the host list right")
-    t.keys("Tab", "Enter", "g", "^U", str(D), "Enter", "Tab")  # right pane: this machine too, in dst
-    t.until(lambda s: f"local:{D}" in s, "right pane in dst")
+    rows = lambda s: s.split("\n")
+    left = lambda s: "\n".join(r.split("│")[0] for r in rows(s)[2:])  # pane 1's rows, side by side
+    t.until(lambda s: " 1 local:" in s and "note.txt" in s and "2 hosts" in s and "F9 menu" in s, "menus, pane 1 here, pane 2 hosts")
+    t.keys("Tab", "Enter", "g", "^U", str(D), "Enter", "Tab")  # pane 2: this machine too, in dst
+    t.until(lambda s: f"2 local:{D}" in s, "pane 2 in dst")
 
-    t.keys("/note", "Enter", "F3")  # view: text, search, hex, back
-    t.until(lambda s: "hello" in s and "/ find" in s, "viewer")
+    t.keys("/note", "Enter", "F3")  # view: less's keys; a search lights its match; hex; back
+    t.until(lambda s: "hello" in s and "/ ? find" in s, "viewer")
     t.keys("/wor", "Enter")
-    t.until(lambda s: t.screen.buffer[1][0].reverse and not t.screen.buffer[0][0].reverse, "viewer search: the match lit")
+    lit = lambda y: t.screen.buffer[y][0].bg != "default" or t.screen.buffer[y][0].reverse
+    t.until(lambda s: lit(1) and not lit(0), "viewer search: the match lit")
     t.keys("x")
     t.until(lambda s: "68 65 6c 6c 6f" in s, "hex")
-    t.keys("q", "F4", "X", "^S", "^Q")  # edit: type, save, quit
-    t.until(lambda s: "F10 quit" in s, "back from the editor")
-    assert (B / "note.txt").read_text() == "Xhello\nworld\n"
-
-    t.keys("A", "^U", "600", "Enter")  # attributes: the mode
-    assert (B / "note.txt").stat().st_mode & 0o777 == 0o600, oct((B / "note.txt").stat().st_mode)
-    t.until(lambda s: "-rw------- " in log(s), "ls -l line of the entry under the cursor")
-    t.keys("c", "Enter")  # F5 copy to the other pane
+    t.keys("q", "F4", "^K", "^U", "X", "^S", "^X")  # edit, nano's keys: cut a line, paste it back (cursor after it), type
+    t.until(lambda s: "F10 quit" in s and (B / "note.txt").read_text() == "hello\nXworld\n", "edited")
+    t.keys("i")  # info
+    t.until(lambda s: "name  note.txt" in s and "-rw-r--r--" in s, "info")
+    t.keys("q", "A", "^U", "600", "Enter")  # attributes: only what's typed changes (here the mode)
+    t.until(lambda s: "-rw------- " in rows(s)[-5] or "-rw------- " in s.split("└─")[-1], "the ls -l line")
+    assert (B / "note.txt").stat().st_mode & 0o777 == 0o600
+    t.keys("c", "Enter")  # F5 copy to the other pane: mode and time travel
     t.until(lambda s: "✓ → note.txt" in s, "copied")
-    assert (D / "note.txt").read_text() == "Xhello\nworld\n" and (D / "note.txt").stat().st_mode & 0o777 == 0o600
+    assert (D / "note.txt").read_text() == "hello\nXworld\n" and (D / "note.txt").stat().st_mode & 0o777 == 0o600 and (D / "note.txt").stat().st_mtime == int((B / "note.txt").stat().st_mtime)
     t.keys("Esc", "/mv", "Enter", "F6", "Enter")  # move
     t.until(lambda s: "✓ moved mv.txt" in s, "moved")
     assert (D / "mv.txt").read_text() == "move me" and not (B / "mv.txt").exists()
-    t.keys("Esc", "F7", "newdir", "Enter")  # new folder, rename, delete
-    assert (B / "newdir").is_dir()
-    t.keys("R", "^U", "renamed", "Enter")
+    t.keys("Esc", "F7", "newdir", "Enter", "R", "^U", "renamed", "Enter")  # new folder, rename, delete
     assert (B / "renamed").is_dir() and not (B / "newdir").exists()
     t.keys("F8", "y")
-    t.until(lambda s: "✓ deleted renamed" in s, "deleted")
-    assert not (B / "renamed").exists()
+    t.until(lambda s: "✓ deleted renamed/" in s and not (B / "renamed").exists(), "deleted")
 
-    t.keys("+", "^U", "*.txt", "Enter")  # marks: by pattern, all / none, one by one, unmark by pattern
-    t.until(lambda s: "[1]" in s and "*note.txt" in s, "marked by pattern")
-    t.keys("*")  # marks there: none
-    t.until(lambda s: "[" not in s.split("\n")[0].split("┬")[0], "no marks")
+    t.keys("/note", "Enter", "L", "^U", str(B / "ln.txt"), "Enter", "Enter")  # a symlink, then retarget it; a hard link
+    t.until(lambda s: (B / "ln.txt").is_symlink(), "symlink")
+    assert os.readlink(B / "ln.txt") == str(B / "note.txt")
+    t.keys("Esc", "/ln.t", "Enter")
+    t.until(lambda s: f"ln.txt -> {B}/note.txt" in s.split("└─")[1] and "ln.txt@ -> " in left(s), "target: row and ls -l line")
+    t.keys("i")
+    t.until(lambda s: f"points to  {B}/note.txt" in s, "target: info")
+    t.keys("q")
+    t.keys("L", "^U", "note.txt", "Enter")
+    t.until(lambda s: os.readlink(B / "ln.txt") == "note.txt", "retargeted")
+    t.keys("Esc", "/note", "Enter", "H", "^U", str(B / "hard.txt"), "Enter")
+    t.until(lambda s: (B / "hard.txt").exists() and (B / "hard.txt").stat().st_ino == (B / "note.txt").stat().st_ino, "hard link")
+    t.keys("Esc")
+
+    (B / "mv" ).mkdir()  # the guards: into itself, two of one name, a folder merge on move, a tree with a pipe, a pipe
+    (B / "mv" / "a.txt").write_text("a")
+    (D / "mv").mkdir()
+    (D / "mv" / "b.txt").write_text("b")
+    (B / "fd").mkdir()
+    (B / "fd" / "f.txt").write_text("f")
+    os.mkfifo(B / "fd" / "p")
+    (D / "fd").mkdir()  # there already: the move merges, so it copies, and a pipe can't be copied
+    os.mkfifo(B / "pipe")
+    t.keys("r", "/sub", "Enter", "c", "^U", str(B / "sub"), "Enter")  # r: what was just made shows
+    t.until(lambda s: "a folder can't go inside itself" in s, "copy into itself refused")
+    t.keys("Esc", "/mv", "Enter", "F6", "Enter", "y")
+    t.until(lambda s: "✓" in s.split("└─")[-1] and not (B / "mv").exists(), "a folder merged on move")
+    assert sorted(x.name for x in (D / "mv").iterdir()) == ["a.txt", "b.txt"]
+    t.keys("Esc", "/fd", "Enter", "F6", "Enter", "y")
+    t.until(lambda s: "kept fd here" in s, "a merged tree with a pipe stays")
+    assert (D / "fd" / "f.txt").read_text() == "f" and (B / "fd" / "p").exists()
+    t.keys("Esc", "/pipe", "Enter", "Enter")
+    t.until(lambda s: "pipe: a pipe, socket or device" in s, "a pipe isn't opened")
+    t.keys("Esc", "g", "^U", "sub", "Enter")  # a relative path: from the pane's folder
+    t.until(lambda s: f"1 local:{B}/sub" in s, "go to sub")
+    (B / "sub" / "note.txt").write_text("dup")
+    t.keys("~", "g", "^U", str(B), "Enter", "^F", "^U", "note.txt", "Enter", "*", "c", "Enter")
+    t.until(lambda s: "two of these have the same name" in s, "two of one name refused")
+    (B / "sub" / "note.txt").unlink()
+    t.keys("h", "Esc", "/note", "Enter", "F4", "\x1c", "hello", "Enter", "Esc", "^X")  # replace, then Esc: nothing
+    t.until(lambda s: "F10 quit" in s, "back from the editor")
+    assert (B / "note.txt").read_text() == "hello\nXworld\n"
+    t.keys("Esc")
+
+    t.keys("+", "^U", "*.txt", "Enter")  # marks: by pattern, none, all, unmark by pattern; what differs over there
+    t.until(lambda s: "[3]" in rows(s)[1] and "*note.txt" in s, "marked by pattern")
+    t.keys("*")
+    t.until(lambda s: "[" not in rows(s)[1].split("┬")[0], "no marks")
     t.keys("*", "-", "^U", "*.zip", "Enter")
     t.until(lambda s: "*note.txt" in s and "*data.zip" not in s, "unmarked by pattern")
-    t.keys("Esc", ".")  # dotfiles, sort
-    t.until(lambda s: ".dot" not in s.split("┬")[0] and "dotfiles hidden" in s, "dotfiles hidden")
-    t.keys(".", "S")
-    t.until(lambda s: ".dot" in s and "sorted by size" in s, "sorted by size")
-    t.keys("S", "S")
+    t.keys("Esc", "D")
+    t.until(lambda s: "differ: F5 copies them over" in s and "*data.zip" in s and "*note.txt" not in s, "compare")
+    t.keys("Esc", ".")  # dotfiles, sort menu
+    t.until(lambda s: ".dot" not in left(s) and "dotfiles hidden" in s, "dotfiles hidden")
+    t.keys(".", "S", "Down", "Down", "Enter")
+    t.until(lambda s: ".dot" in left(s) and "sorted by size" in s, "sorted by size")
+    t.keys("S", "Down", "Down", "Down", "Down", "Enter")
+    t.until(lambda s: "sorted by size, reversed" in s, "reversed")
+    t.keys("S", "Down", "Down", "Down", "Down", "Enter", "S", "Enter")
+    t.until(lambda s: s.count("sorted by name") and "sorted by name, reversed" not in s.split("\n")[-2], "back to by name")
+    t.keys("/sub", "Enter", "z")  # size of a folder
+    t.until(lambda s: "sub: 4B in 1 files" in s, "size")
+
+    (B / "sub" / "gone.txt").write_text("x")  # find: results as the listing; links in them, a delete, a link made
+    (B / "sub" / "deep.lnk").symlink_to("deep.txt")
+    t.keys("Esc", "^F", "^U", "*", "Enter")
+    t.until(lambda s: "sub/deep.lnk@ -> deep.txt" in s and "sub/gone.txt" in s, "find: every entry, links with targets")
+    t.keys("/gone", "Enter", "F8", "y")
+    t.until(lambda s: "sub/gone.txt" not in left(s).split("└─")[0] and "1 find * in local:" in s, "a delete leaves the find results")
+    t.keys("Esc", "/deep.t", "Enter", "H", "Enter")
+    t.until(lambda s: (D / "deep.txt").exists(), "a link from a find result: by its own name, in the other pane")
+    assert (D / "deep.txt").stat().st_ino == (B / "sub" / "deep.txt").stat().st_ino
+    t.keys("Esc", "^F", "^U", "deep*", "Enter")  # ⏎ on a result goes there; history back and forth
+    t.until(lambda s: "1 find deep* in local:" in s and "sub/deep.txt" in s, "find")
+    t.keys("Down", "Enter")
+    t.until(lambda s: f"1 local:{B}/sub" in s, "to the found file's folder")
+    t.keys("b")
+    t.until(lambda s: f"1 local:{B} " in s, "back")
+    t.keys("f")
+    t.until(lambda s: f"1 local:{B}/sub" in s, "forward")
+    t.keys("b", "o")  # the other pane here; swap; swap back
+    t.until(lambda s: f"2 local:{B} " in s, "other pane here")
+    t.keys("^U")
+    t.until(lambda s: rows(s)[1].startswith("┌─ 1 local") and t.text().count(f"local:{B}") == 2, "swapped")
+    t.keys("^U", "Tab", "b", "Tab")
+    t.until(lambda s: f"2 local:{D}" in s, "pane 2 back in dst")
 
     t.keys("/data", "Enter", "Enter")  # an archive: in, a folder in it, view, out at its top
     t.until(lambda s: "data.zip:/" in s and "inside/" in s, "inside the archive")
     t.keys("Down", "Enter", "Down", "F3")
     t.until(lambda s: "AAAA" in s, "a file in the archive")
-    t.keys("q", "h", "h")
-    t.until(lambda s: "data.zip" in s and "data.zip:/" not in s, "out of the archive")
+    t.keys("q", "h", " ")  # a mark inside means nothing outside
+    t.until(lambda s: "[1]" in rows(s)[1], "marked inside")
+    t.keys("h")  # at the archive's top: out of it
+    t.until(lambda s: "data.zip" in s and "data.zip:/" not in s and "[" not in rows(s)[1].split("┬")[0], "out, unmarked")
     t.keys("Esc", "/m.mark", "Enter", "Enter")  # [open] runs your command
     t.until(lambda s: "F10 quit" in s and (B / "m.marker.opened").exists(), "[open]")
-    t.keys("Esc", "/note", "Enter", "F2", "Enter", "Enter")  # F2 runs a [commands] entry, then waits for ⏎
+    t.keys("Esc", "/note", "Enter", "F2", "Enter", "Enter")  # F2: a [commands] entry, then a wait for ⏎
     t.until(lambda s: (B / "menu.out").exists(), "F2 command")
     assert (B / "menu.out").read_text() == "hi note.txt\n"
     t.keys("^O")  # a shell here
@@ -171,38 +264,80 @@ try:
     t.keys("echo here > shell.out; exit\n")
     t.until(lambda s: "F10 quit" in s and (B / "shell.out").exists(), "shell")
 
-    t.keys("Esc", "~")  # home, go to, the host list, the config in rshm's own editor, theme, reload, help
-    t.until(lambda s: f"local:{T} " in s, "home")
-    t.keys("g", "^U", str(B), "Enter", "F9")
-    t.until(lambda s: "─ hosts" in s.split("┬")[0] and "▸ here" in s, "host list")
-    t.keys("Down", "Enter")  # a group unfolds, h folds it again
+    t.keys("Esc", "~")  # home, go to; the host list (a group folds), the config in rshm's own editor; theme; help
+    t.until(lambda s: f"1 local:{T} " in s, "home")
+    t.keys("g", "^U", str(B), "Enter", "@")
+    t.until(lambda s: "1 hosts" in s and "▸ here" in s, "host list")
+    t.keys("Down", "Enter")
     t.until(lambda s: "▾ here" in s and "jumped" in s, "group unfolded")
     t.keys("h")
     t.until(lambda s: "▸ here" in s and "jumped" not in s, "group folded")
-    t.keys("e")
+    t.keys("F4")
     t.until(lambda s: "[hosts]" in s and "^S save" in s, "config in the editor")
-    t.keys("^Q", "t")
+    t.keys("^X", "Esc", "t")
     t.until(lambda s: "theme: matrix" in s, "theme")
     assert 'theme = "matrix"' in (T / "rshm.toml").read_text()
-    t.keys("Esc", "r", "F1")
-    t.until(lambda s: "help: all keys" in s and "copy to the other pane" in s, "help")
+    t.keys("F1")
+    t.until(lambda s: "copy to the other pane" in s and "F5 c" in s, "help: every key")
+    t.keys("Esc", "F9")  # the menu bar: F9, ← → between menus (one open, lit in the bar), Esc; taps on menus and items
+    t.until(lambda s: "host list" in s and "swap panes" in s, "menu: Pane 1")
+    t.keys("Right", "Right")
+    cell = lambda word: t.screen.buffer[0][rows(t.text())[0].index(word)]
+    lit = lambda word: (cell(word).bg, cell(word).reverse) != (cell("Pane 2").bg, cell("Pane 2").reverse)
+    t.until(lambda s: "mark names like" in s and "info: everything" not in s and "swap panes" not in s and lit("Mark")
+            and not lit("File"), "menu: Mark, and only Mark")
     t.keys("Esc")
-
-    t.click(2, 5)  # mouse: a click selects, a second opens; .. is the first row
-    t.click(1, 5)
-    t.click(1, 5)
-    t.until(lambda s: f"local:{T} " in s, "mouse: up a folder")
+    t.until(lambda s: "mark names like" not in s and not lit("Mark"), "menus closed")
+    if MOUSE:  # taps: bar, menu item, F-key bar, titles, rows, right-click (no mouse in this terminal: keys only)
+        t.click(0, rows(t.text())[0].index("Options") + 1)
+        t.until(lambda s: "edit config" in s and "theme" in s, "Options by a tap")
+        y = next(i for i, r in enumerate(rows(t.text())) if "dotfiles" in r or "theme" in r and "│" in r)
+        t.click(y, rows(t.text())[y].index("theme") + 1)
+        t.until(lambda s: "theme: amber" in s, "an item by a tap")
+        t.click(len(rows(t.text())) - 1, rows(t.text())[-1].index("F7 mkdir") + 1)  # the F-key bar answers taps
+        t.until(lambda s: "new folder:" in s, "F7 by a tap")
+        t.keys("Esc")
+        t.click(1, 5)  # a tap on a title: the host list; again: back
+        t.until(lambda s: "1 hosts" in s, "title tap: host list")
+        t.click(1, 5)
+        t.until(lambda s: f"1 local:{B}" in s, "title tap: back")
+        t.click(3, 5)  # a tap selects, a second opens; right-click: the menu of what's under it
+        t.click(2, 5)
+        t.click(2, 5)
+        t.until(lambda s: f"1 local:{T} " in s, "mouse: up a folder")
+        t.click(4, 5, 2)
+        t.until(lambda s: "info: everything about it" in s and "symlink" in s, "right-click menu")
+        t.keys("Esc")
+    for k in ("[", "[", "]"):  # the log: older, newer
+        t.keys(k)
+    t.until(lambda s: "↑1" in s, "log scrolled")
+    t.keys("]")
+    t.until(lambda s: "↑" not in rows(s)[-5], "log at the newest")
 
     t.resize(40, 60)  # upright: stacked; small: one pane, said once; back
-    t.until(lambda s: s.split("\n")[0].startswith("┌─ local") and any(r.startswith("├─") for r in s.split("\n")), "stacked")
+    t.until(lambda s: rows(s)[1].startswith("┌─ 1 local") and any(r.startswith("├─ 2") for r in rows(s)), "stacked")
     t.resize(9, 30)
     t.until(lambda s: "one pane: Tab swaps" in s and "┬" not in s and "├" not in s, "one pane")
     t.keys("Tab")
-    t.until(lambda s: f"local:{D}"[-10:] in s, "Tab shows the other pane")
-    t.resize(4, 30)
-    t.until(lambda s: "terminal too small" in s, "too small")
+    t.until(lambda s: " 2 " in rows(s)[1], "Tab shows pane 2")
+    t.resize(5, 30)
+    t.until(lambda s: "too small: 30×5, needs 20×7" in s, "too small")
     t.resize(30, 120)
     t.until(lambda s: "┬" in s, "side by side again")
+    t.sweep(lambda s: "F10 quit" in s, "the panes")  # every screen through every size, a tiny terminal included
+    t.keys("g", "^U", str(B), "Enter", "/note", "Enter", "F3")
+    t.sweep(lambda s: "/ ? find" in s and "hello" in s, "the viewer")
+    t.keys("q", "F4", "Y")
+    t.sweep(lambda s: "^S save" in s and rows(s)[0].startswith("Yhello"), "the editor, an edit unsaved")
+    t.keys("^S", "^X")
+    t.until(lambda s: "F10 quit" in s and (B / "note.txt").read_text() == "Yhello\nXworld\n", "the edit kept through it all")
+    t.keys("F9")
+    t.sweep(lambda s: "host list" in s and "swap panes" in s, "a menu")
+    t.keys("Esc", "g")
+    t.sweep(lambda s: "go to:" in s, "a prompt")
+    t.keys("Esc", "F1")
+    t.sweep(lambda s: "copy to the other pane" in s, "help")
+    t.keys("Esc")
     assert t.quit() == 0
 
     # --- 2. hosts, through a throwaway sshd ---
@@ -242,6 +377,7 @@ try:
         os.chmod(L / "sub" / "x.sh", 0o750)
         (T / "remote").mkdir()
         (T / "remote" / "r.txt").write_text("remote\n")
+        (T / "remote" / "r.lnk").symlink_to("r.txt")
         t = Term(["jumped"], L)  # `rshm jumped`: the host on the right, this machine on the left
         t.until(lambda s: "jumped:/" in s and "big.bin" in s, "both panes")
         assert len(sockets()) == 1, sockets()
@@ -255,10 +391,18 @@ try:
         assert len(sockets()) == 1, sockets()
         t.keys("p")  # the live check
         t.until(lambda s: "✓ jumped answers" in s, "live check")
+        t.keys("r", "@")  # a reload keeps the pane's host and its folder
+        t.until(lambda s: "● jumped" in s, "reload: the host is still this pane's")
+        t.keys("@")
         t.keys("g", "^U", str(T / "remote"), "Enter", "/r.txt", "Enter", "F3")  # a host's file, rshm's viewer and editor
         t.until(lambda s: s.startswith("remote") and "jumped:" in s, "remote file viewed")
-        t.keys("q", "F4", "Z", "^S", "^Q")
+        t.keys("q", "F4", "Z", "^S", "^X")
         t.until(lambda s: "F10 quit" in s and (T / "remote" / "r.txt").read_text() == "Zremote\n", "remote file edited")
+        t.keys("Esc", "/r.lnk", "Enter")  # a host's link: its target shown; your [open] tool gets what it points to
+        t.until(lambda s: "r.lnk@ -> r.txt" in s, "a host's link and its target")
+        t.keys("Enter")
+        t.until(lambda s: "F10 quit" in s and (T / "got.txt").exists() and (T / "got.txt").read_text() == "Zremote\n",
+                "a tool on a host's link gets its content")
         assert t.quit() == 0
         time.sleep(2)
         assert sockets() == [], f"the screen left logins behind: {sockets()}"
@@ -268,7 +412,7 @@ try:
         tick = lambda *a, **k: None
         for src, sp, dst, dp in ((Lo, L, R, T / "remote" / "t"), (R, T / "remote" / "t", Lo, T / "down"),
                                  (R, T / "remote" / "t" / "big.bin", R, T / "remote" / "same.bin")):  # the last within one host
-            tick.finished = set()
+            tick.finished, tick.skipped = set(), []
             fs.copy(src, str(sp), dst, str(dp), tick)
         fs.save(R, str(T / "remote" / "saved.txt"), b"over ssh\n")  # what the built-in editor's ^S does
         R.chattr(str(T / "remote" / "saved.txt"), {"perm": 0o604})
@@ -276,7 +420,7 @@ try:
         sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
         assert sha(T / "down" / "big.bin") == sha(L / "big.bin") == sha(T / "remote" / "t" / "big.bin") == sha(T / "remote" / "same.bin")
         assert (T / "remote" / "saved.txt").read_bytes() == b"over ssh\n" and (T / "remote" / "saved.txt").stat().st_mode & 0o777 == 0o604
-        assert (T / "down" / "sub" / "x.sh").stat().st_mode & 0o777 == 0o750 & ~os.umask(os.umask(0))
+        assert (T / "down" / "sub" / "x.sh").stat().st_mode & 0o777 == 0o750
         assert not list(T.rglob("*" + fs.PART)) and len(sockets()) == 1
         assert ssh.quiet([*ssh.argv(h, batch=True, timeout=3), "jumped", "true"])[0] == 0  # the live check
         ssh.logout()

@@ -5,33 +5,26 @@ from pathlib import Path
 
 SSH_CONFIG = Path.home() / ".ssh" / "config"
 SAMPLE = """\
-theme = "default"   # default | matrix | amber | frutiger | teletext   (`t` cycles and saves)
-# include = ["stations.toml"]   # files beside this one whose [hosts] join these (generated lists, say)
+theme = "default"                         # default matrix amber frutiger teletext
+include = []                              # more files beside this one, whose [hosts] join these
 
-# Your tools, else $VISUAL/$EDITOR and $PAGER, else rshm's own. {file} is the file; left out, it goes last.
-[tools]
-# edit = "nvim"
-# view = "bat --paging=always {file}"
+[tools]                                   # empty: $VISUAL, $EDITOR, $PAGER, else rshm's own
+edit = ""                                 # "nvim", "code -w {file}"
+view = ""                                 # "less -R", "bat --paging=always"
 
-# ⏎ on a file: the first pattern that matches runs its command, before rshm's own viewer and archive browsing.
-[open]
-# "*.pdf" = "zathura {file}"
-# "*.7z *.rar" = "7z l {file} | less"
+[open]                                    # ⏎ on a file: the first matching pattern runs its command
+# "*.pdf *.djvu" = "zathura {file}"
 
-# A host is an ssh destination: an ~/.ssh/config alias, a host or user@host. Users, keys, jumps and passwords
-# belong in ~/.ssh/config. Its hosts show up here on their own; list them to group them.
-[hosts]
-localhost = "localhost"
-# lab = ["pi", "box"]                     # a group of hosts, each named as itself
-# [hosts.prod]                            # a table is a group too; nest as deep as you like
-# web = "deploy@web.example.com"          # name = destination
-# db = { host = "db", path = "/srv/db" }  # path: the folder to start in
+[commands]                                # F2, in the pane's folder: {name} {names} {dir} {other}
+# "disk usage" = "du -sh {names}"
+# "ACLs" = "getfacl {names}"
 
-# F2 menu: name = shell command, run in the pane's folder (over ssh on a host). {name} the file under the cursor,
-# {names} the marked ones (else that one), {dir} the folder, {other} the other pane's folder; all shell-quoted.
-[commands]
-"disk usage" = "du -sh {names}"
-# "tar.gz it" = "tar czf {name}.tar.gz {name}"
+[hosts]                                   # ssh destinations; reaching them is ~/.ssh/config's business
+# work = "work"
+# pi = { host = "me@pi", path = "/srv" }
+# lab = ["box", "nas"]
+# [hosts.prod]
+# web = "deploy@web.example.com"
 """
 
 
@@ -57,12 +50,12 @@ def create(cfg):  # only when asked for (`e` in the host list): the commented sa
         save(cfg, SAMPLE)
 
 
-def save(path, text, mode=0o600):  # atomic (a crash can't leave half a file), private all the way, symlinks kept
+def save(path, text):  # atomic (a crash can't leave half a file), private all the way, symlinks kept
     path = path.resolve()
     tmp = path.with_name(f".{path.name}.rshm-tmp")
     tmp.unlink(missing_ok=True)
     try:
-        tmp.touch(mode)
+        tmp.touch(0o600)
         tmp.write_text(text)
         os.replace(tmp, path)
     except BaseException:  # disk full, ^C: no half-written temp file left behind
@@ -112,7 +105,9 @@ def tree(node):  # every host a table {"host": destination, ...}, once, so per-h
         node = {x: x for x in node if isinstance(x, str)}
     out = {}
     for k, v in (node.items() if isinstance(node, dict) else ()):
-        out[k] = {"host": v} if isinstance(v, str) else v if isinstance(v, dict) and "host" in v else tree(v)
+        v = {"host": v} if isinstance(v, str) else v
+        ok = isinstance(v, dict) and isinstance(v.get("host"), str)  # a host: its destination and path, text only
+        out[k] = {x: v[x] for x in ("host", "path") if isinstance(v.get(x), str)} if ok else tree(v)
     return out
 
 
@@ -133,7 +128,7 @@ def ssh_hosts(path, seen=()):  # Host aliases of an ssh config, Includes followe
 def flat(node, closed, depth=0, path=()):  # the tree (from tree()) as rows: (depth, name, host or None, path)
     for k, v in node.items():
         p = path + (k,)
-        if "host" in v:
+        if isinstance(v.get("host"), str):  # a host; a group may hold one named "host"
             yield depth, k, v, p
         else:
             yield depth, k, None, p

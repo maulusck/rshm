@@ -50,5 +50,5 @@ def connect(h, term, say, timeout=8):  # make sure h's master is up and logged i
                      "-o", "NumberOfPasswordPrompts=1", "-N", h["host"]])  # ControlPersist: backgrounds once in
     if rc and (unreachable(err) or term([*argv(h, timeout=timeout), "-N", h["host"]]) != 0):
         # else ssh asks in the terminal (new host key, 2FA, a password); a dead network won't take a typed one
-        raise OSError(err if err.startswith(h["host"]) else f"{h['host']}: {err}")
+        raise ConnectionError(err if err.startswith(h["host"]) else f"{h['host']}: {err}")
     LOGINS.append(h)
