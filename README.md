@@ -19,7 +19,7 @@ Windows OpenSSH, Dropbear with sftp-server, SFTP-only and chrooted accounts).
 ## Screen
 
 ```
- Pane 1   File   Mark   Command   Options   Pane 2           menus: F9 or a tap; one open at a time, lit
+ Pane 1   File   Mark   Command   Options   Pane 2  me@box   menus: F9 or a tap; one open at a time, lit; who and where
 ┌─ 1 local:/home/me 28G free ──┬─ 2 web:/srv/app ─────────┐ pane number, host:folder, marks, filter, free space
  ..                            │ ..                        names cut in the middle, the extension kept;
  src/                          │ static/                   ls -F marks: / folder @ link * program | fifo = socket
@@ -27,7 +27,7 @@ Windows OpenSSH, Dropbear with sftp-server, SFTP-only and chrooted accounts).
 *notes.md                 4.1K │ config.toml           1K  colour by kind, from the theme
 └─ -rw-r--r-- 1 me:me 4.1K 2026-10-14 16:22 notes.md ─────┘ the entry under the cursor, ls -l style
  16:22:05 ✓ → notes.md  4.1K in 0s                         the log: wheel or [ ] scroll it
-F1 help F2 menu F3 view F4 edit F5 copy … F10 quit          mc's F-keys: press or tap
+1help    2menu    3view    4edit    5copy  …  10quit         mc's F-keys, in mc's slots: press or tap
 ```
 
 Each pane shows a folder, here or on a host, or the host list (`@`, or tap its title). The panes sit side by side,
@@ -52,7 +52,7 @@ one above the other when the terminal stands upright (a phone, Termux), one at a
 | `Tab` · `@` · `Esc` · `r` · `t` · `[` `]` · `^L` · `F10` `q` | other pane · host list · back: filter, marks, find results, host list; stops what's running · reload · theme · log · draw the screen again · quit |
 
 Every question line edits like a shell's: `←` `→` `Home` `End` `Del`, `^A` `^E` `^K` `^U` `^W`; in a form, `↑` `↓` `Tab`
-move between rows. Mouse and touch: tap selects, a second tap opens (a host opens at once); right-click opens the
+move between rows. Mouse and touch: tap selects, a second tap opens (a host too); right-click opens the
 menu of what's under it (`F2`); the wheel scrolls panes, the log, menus, viewer and editor. The viewer has less's keys (`space` `b` `g` `G`
 `/` `?` `n` `N`, `N g` for line N, `w` wrap, `x` hex), the editor nano's (`^S` save, `^X` exit, `^W` find,
 `^\` replace, `^K` `^U` cut and paste lines, `^_` line, `^Z` undo).

@@ -1,34 +1,34 @@
 """The screen, mc's way: a menu bar, two panes (each a folder here or on a host, or the host list), the activity log,
 the F-key bar. Every action is one row of KEYS: keys, menu, F-key bar, F1 and --help all come from there."""
-import atexit, contextlib, curses, fnmatch, grp, os, posixpath, pwd, shlex, shutil, signal, stat, subprocess, sys
+import atexit, contextlib, curses, fnmatch, grp, os, posixpath, pwd, shlex, shutil, signal, socket, stat, subprocess, sys
 import tempfile, time, tomllib
 from collections import deque
 
 from . import config, edit as editor, view as viewer
-from .fs import (ARCHIVES, PART, Archive, Local, Remote, copy, folder, isdir, islink, join, kind, look, marker, peek,
+from .fs import (ARCHIVES, PART, Archive, Local, Remote, copy, folder, isdir, islink, join, kind, look, marker, names, peek,
                  rm, save, special, walk)
 from .screen import CLICK, MOVES, RIGHT, WHEEL_DOWN, WHEEL_UP, bar, cells, fit, human, line, readline, safe
 from .ssh import argv, connect, quiet, unreachable
 
 ROLES = ("norm", "sel", "acc", "dim", "err", "bar", "dir", "exe", "link", "stale", "archive", "media", "special",
-         "hidden", "file")
-THEMES = {  # (fg, bg[, b(old) d(im) u(nderline)]) per role; -1 = the terminal's own
-    "default": [(-1, -1), (0, 6), (6, -1), (-1, -1, "d"), (1, -1, "b"), (0, 6), (4, -1, "b"), (2, -1, "b"), (6, -1),
-                (1, -1), (5, -1), (3, -1), (3, -1, "b"), (-1, -1, "d"), (-1, -1)],
-    "matrix": [(34, 16), (16, 46), (46, 16, "b"), (22, 16), (118, 16, "b"), (16, 34), (46, 16, "b"), (120, 16, "b"),
-               (41, 16), (28, 16, "u"), (112, 16), (77, 16), (40, 16, "b"), (22, 16), (34, 16)],  # phosphor on black
-    "amber": [(214, 16), (16, 214), (220, 16, "b"), (130, 16), (202, 16, "b"), (16, 172), (220, 16, "b"), (228, 16, "b"),
-              (179, 16), (166, 16, "u"), (215, 16), (222, 16), (208, 16, "b"), (94, 16), (214, 16)],  # amber CRT
+         "hidden", "file", "ok")
+THEMES = {  # (fg, bg[, b(old) d(im)]) per role; -1 = the terminal's own
+    "default": [(-1, -1), (0, 6), (6, -1, "b"), (-1, -1, "d"), (1, -1, "b"), (0, 6), (4, -1, "b"), (2, -1, "b"), (6, -1),
+                (1, -1), (5, -1), (3, -1), (3, -1, "b"), (-1, -1, "d"), (-1, -1), (2, -1, "b")],  # your terminal's colours
+    "matrix": [(34, 16), (16, 46), (46, 16, "b"), (22, 16), (196, 16, "b"), (46, 22), (46, 16, "b"), (120, 16, "b"),
+               (37, 16), (124, 16), (112, 16), (77, 16), (226, 16), (28, 16), (34, 16), (46, 16, "b")],  # phosphor
+    "amber": [(214, 16), (16, 214), (220, 16, "b"), (130, 16), (196, 16, "b"), (222, 94), (220, 16, "b"), (228, 16, "b"),
+              (179, 16), (124, 16), (215, 16), (222, 16), (231, 16, "b"), (94, 16), (214, 16), (228, 16, "b")],  # amber CRT
     "frutiger": [(24, 195), (231, 38), (31, 195, "b"), (109, 195), (160, 195, "b"), (231, 33), (25, 195, "b"),
-                 (28, 195, "b"), (37, 195), (160, 195, "u"), (97, 195), (35, 195), (130, 195, "b"), (109, 195),
-                 (24, 195)],  # Aero: sky, aqua, glass
-    "teletext": [(231, 16), (16, 226), (51, 16, "b"), (21, 16), (196, 16, "b"), (226, 21), (226, 16, "b"), (46, 16, "b"),
-                 (51, 16), (196, 16, "u"), (201, 16), (46, 16), (201, 16, "b"), (21, 16), (231, 16)],  # Ceefax primaries
+                 (28, 195, "b"), (37, 195), (160, 195), (97, 195), (35, 195), (130, 195, "b"), (109, 195),
+                 (24, 195), (28, 195, "b")],  # Aero: sky, aqua, glass
+    "teletext": [(231, 16), (16, 226), (51, 16, "b"), (27, 16), (196, 16, "b"), (226, 21), (226, 16, "b"), (46, 16, "b"),
+                 (51, 16), (196, 16), (201, 16), (46, 16), (201, 16, "b"), (27, 16), (231, 16), (46, 16, "b")],  # Ceefax
 }
 MONO = dict(zip(ROLES, (0, curses.A_REVERSE, curses.A_BOLD, curses.A_DIM, curses.A_BOLD | curses.A_STANDOUT,
-                        curses.A_REVERSE, curses.A_BOLD, curses.A_BOLD, curses.A_UNDERLINE, curses.A_STANDOUT, 0, 0,
-                        curses.A_BOLD, curses.A_DIM, 0)))
-STYLE = {"b": curses.A_BOLD, "d": curses.A_DIM, "u": curses.A_UNDERLINE}
+                        curses.A_REVERSE, curses.A_BOLD, curses.A_BOLD, 0, curses.A_DIM, 0, 0, curses.A_BOLD,
+                        curses.A_DIM, 0, curses.A_BOLD)))
+STYLE = {"b": curses.A_BOLD, "d": curses.A_DIM}
 NAMES = {"⏎": (10, 13, curses.KEY_ENTER), "→": (curses.KEY_RIGHT,), "←": (curses.KEY_LEFT,), "Space": (32,),
          "⌫": (curses.KEY_BACKSPACE, 127, 8), "Del": (curses.KEY_DC,), "Ins": (curses.KEY_IC,), "Tab": (9,),
          "Esc": (27,), **{f"^{c}": (ord(c) - 64,) for c in "FLORU"}, **{f"F{i}": (curses.KEY_F0 + i,) for i in range(1, 11)}}
@@ -39,7 +39,8 @@ KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under bo
     ("File", "F5 c", "copy to the other pane", "copy"), ("File", "F6 m", "move to the other pane", "move"),
     ("File", "F7 n", "mkdir: new folder", "mkdir"), ("File", "F8 x Del", "delete", "delete"),
     ("File", "R", "rename", "rename"), ("File", "A", "attributes: mode, owner, time", "chattr"),
-    ("File", "L", "symlink (on a link: retarget)", "symlink"), ("File", "H", "hard link", "hardlink"),
+    ("File", "L", "symlink to it (on a link: retarget)", "symlink"),
+    ("File", "H", "hard link to it", "hardlink"),
     ("File", "z", "size", "size"),
     ("Mark", "Space Ins", "mark", "mark"), ("Mark", "*", "all / none", "markall"),
     ("Mark", "+", "mark names like…", "markpat"), ("Mark", "-", "unmark names like…", "unmarkpat"),
@@ -64,6 +65,7 @@ HEAD = 1 << 20  # rshm's viewer shows a file's first HEAD bytes; its editor take
 ORDER = {"name": lambda x: x[0].casefold(), "extension": lambda x: (posixpath.splitext(x[0])[1].casefold(), x[0]),
          "size": lambda x: -x[1].get("size", 0), "date": lambda x: -x[1].get("mtime", 0)}
 LOCAL = {"host": "local"}  # the host-list entry for this machine
+ME = f"{names(os.getuid(), os.getgid())[0]}@{socket.gethostname().split('.')[0]}"  # where you are, on the menu bar
 SHELL = 'exec "${SHELL:-sh}" -l'
 MIN_W, MIN_H, PANE_W, PANE_H = 20, 7, 24, 4  # the whole screen, and one pane (title row included), at the least
 
@@ -529,7 +531,8 @@ class App:
             curses.curs_set(0)
 
     def sort(s):
-        i = s.choose([(o, "✓" if o == s.order else "") for o in ORDER] + [("reverse", "✓" if s.rev else "")])
+        i = s.choose([(o, "✓" if o == s.order else "") for o in ORDER] + [("reverse", "✓" if s.rev else "")],
+                     title="sort")
         if isinstance(i, int):
             if i == len(ORDER):
                 s.rev = not s.rev
@@ -894,12 +897,14 @@ class App:
         p = s.P                       # [commands] too (run in this pane's folder)
         acts = [r for r in KEYS if r[3] in ("open", "shell", "ping", "edit")] if p.mode == "hosts" else menu_rows("File")
         cmds = list(s.cmds) if p.mode == "files" else []
-        i = s.choose([(w, k) for _, k, w, _ in acts] + [(f"$ {n}", "") for n in cmds], y, x)
+        c = p.cur()
+        i = s.choose([(w, k) for _, k, w, _ in acts] + [(f"$ {n}", "") for n in cmds], y, x,
+                     title=(c[1] if p.mode == "hosts" else c[0]) if c else "")
         if not isinstance(i, int):
             return
         if i < len(acts):
             return s.act(getattr(s, acts[i][3]))
-        q, c = shlex.quote, p.cur()
+        q = shlex.quote
         sub = {"{name}": q(c[0]) if c and c[1] else "", "{names}": " ".join(q(n) for n, _ in p.targets()),
                "{dir}": q(p.cwd), "{other}": q(s.O.cwd)}
         cmd = s.cmds[cmds[i - len(acts)]]
@@ -960,7 +965,7 @@ class App:
         s.logoff = max(0, min(len(s.log) - 1, s.logoff + d))
 
     def help(s, y=None, x=None):  # every key; ⏎ runs the chosen one
-        i = s.choose([(w, k) for _, k, w, _ in KEYS], y, x)
+        i = s.choose([(w, k) for _, k, w, _ in KEYS], y, x, title="keys")
         if isinstance(i, int) and KEYS[i][3]:
             s.act(getattr(s, KEYS[i][3]))
 
@@ -1007,20 +1012,28 @@ class App:
         _, py, px, _, _ = next((r for r in s.rects if r[0] == s.focus), (0, 1, 0, 0, 0))
         return py + v.sel - v.top + 1, px + 2
 
-    def popup(s, items, i, y0, x0):  # (label, right) rows in a box over a fresh frame, row i lit -> (win, y, x, w, h, off)
+    def popup(s, items, i, y0, x0, title=""):  # (label, right) rows framed over a fresh frame, row i lit
         s.paint()  # one overlay over a fresh screen each time, placed for the size it has now: no leftovers
-        s.scr.noutrefresh()
+        s.scr.noutrefresh()  # -> (win, y, x, w, h, off)
         H, W = s.scr.getmaxyx()
-        w, h = min(max(cells(l) + cells(k) for l, k in items) + 6, W), min(len(items) + 2, H)
+        w = min(max(max(cells(l) + cells(k) for l, k in items) + 6, cells(title) + 6), W)
+        h = min(len(items) + 2, H)
         y, x = max(0, min(y0, H - h)), max(0, min(x0, W - w))
         win = curses.newwin(h, w, y, x)
         win.keypad(True)
         win.bkgd(" ", s.C["norm"])
         off = max(0, i - h + 3)  # scroll when the terminal is shorter than the menu
-        with contextlib.suppress(curses.error):  # a terminal too small for a box: what fits shows
-            win.box()
+        with contextlib.suppress(curses.error):  # a terminal too small for a frame: what fits shows
+            top = f"─ {title} " if title else ""
+            win.addstr(0, 0, "┌" + top + "─" * (w - 2 - cells(top)) + "┐", s.C["acc"])
+            if title:
+                win.addstr(0, 2, f" {title} ", s.C["acc"] | curses.A_BOLD)
             for r, (l, k) in enumerate(items[off:off + h - 2]):
+                win.addstr(r + 1, 0, "│", s.C["acc"])
                 win.addstr(r + 1, 1, bar(f" {l}", f"{k} ", w - 1), s.C["sel" if r + off == i else "norm"])
+                win.addstr(r + 1, w - 1, "│", s.C["acc"])
+            win.addstr(h - 1, 0, "└" + "─" * (w - 2), s.C["acc"])
+            win.insstr(h - 1, w - 1, "┘", s.C["acc"])  # the very last cell: written without moving past it
         win.noutrefresh()
         curses.doupdate()
         return win, y, x, w, h, off
@@ -1031,15 +1044,15 @@ class App:
             items = [(l, v) for (l, _), v in zip(rows, vals)]
             with s.still():
                 vals[i], k = line(s.scr, f"{title} {rows[i][0]}:", vals[i], s.C["acc"] | curses.A_BOLD,
-                                  lambda: s.popup(items, i, y0, x0), (curses.KEY_UP, curses.KEY_DOWN, "\t"))
+                                  lambda: s.popup(items, i, y0, x0, title), (curses.KEY_UP, curses.KEY_DOWN, "\t"))
             if k in ("\n", "\x1b"):
                 return vals if k == "\n" else None
             i = (i + (-1 if k == curses.KEY_UP else 1)) % len(rows)
 
-    def choose(s, items, y=None, x=None, nav=False):  # a popup of (label, keys) -> index, None, or with nav:
-        i, (y0, x0) = 0, (y, x) if y is not None else s.anchor()  # "left"/"right", or (y, x) of a tap outside it
+    def choose(s, items, y=None, x=None, nav=False, title=""):  # a popup of (label, keys) -> index, None, or with
+        i, (y0, x0) = 0, (y, x) if y is not None else s.anchor()   # nav: "left"/"right", or (y, x) of a tap outside it
         while True:
-            win, y, x, w, h, off = s.popup(items, i, y0, x0)
+            win, y, x, w, h, off = s.popup(items, i, y0, x0, title)
             c = win.getch()
             if c == curses.KEY_RESIZE:
                 continue
@@ -1107,7 +1120,7 @@ class App:
         again, p.v.sel = j == p.v.sel, j
         if b & RIGHT:
             return s.menu(y, x)
-        if again or p.mode == "hosts":  # a host or group answers the first tap; a file the second
+        if again:  # a tap selects, the second opens: a host (a login) too, never by a stray tap
             s.open()
 
     # --- drawing ---
@@ -1135,7 +1148,7 @@ class App:
                                     f" /{p.v.flt}" if p.v.flt else "",
                                     f" {human(p.free)} free" if p.free is not None and p.mode == "files" else "",
                                     " · 1 of 2, Tab" if s.single else ""))
-        return f" {i + 1} " + bar(where, right + " ", w - 6, "mid").rstrip() + " "  # host and folder end both stay
+        return f" {i + 1}  " + bar(where, right + " ", w - 7, "mid").rstrip() + " "  # host and folder end both stay
 
     def paint_pane(s, i, y, x, h, w, W):  # pane i in its rectangle: a title row, then its rows
         p, active, sc = s.panes[i], i == s.focus, s.scr
@@ -1145,6 +1158,7 @@ class App:
         right = ("┐" if y == 1 else "┤") if x + w == W else ""
         t = f"{left}─{s.title(i, p, w)}"
         sc.addstr(y, x, t + "─" * (w - cells(t) - len(right)) + right, s.C["acc" if active else "dim"])
+        sc.addstr(y, x + cells(left) + 1, f" {i + 1} ", s.C["sel"] if active else s.C["dim"] | curses.A_REVERSE)  # a tab
         lx = x + bool(x)  # a pane on the right has the separator to its left
         cw = x + w - lx - 1
         for r in range(n):
@@ -1166,8 +1180,8 @@ class App:
                 shown = name + (marker(a) if name != ".." else "") + (f" -> {a['target']}" if a and "target" in a else "")
                 text = mark + fit(shown, cw - cells(info) - 2, "mid") + " " + info
                 at = s.C["acc"] | curses.A_BOLD if mark == "*" else s.C[kind(name, a)]
-            if j == v.sel:
-                at = s.C["sel"] if active else at | curses.A_UNDERLINE
+            if j == v.sel and active:
+                at = s.C["sel"]
             sc.addstr(y + 1 + r, lx, fit(text, cw), at)
         if v.top:
             sc.addstr(y + 1, lx + cw - 1, "▲", s.C["acc"])
@@ -1185,6 +1199,28 @@ class App:
             spans.append((x, x + cells(text), what))
             x += cells(text) + 1
         s.spans[key] = spans
+
+    def paint_log(s, y, ln, W):  # a log line: its time faint, ✓ and ✗ in their colours, an error's words too
+        when, _, msg = ln.partition(" ")
+        mark = msg[:1] if msg[:1] in "✓✗" else ""
+        body = s.C["err"] if mark == "✗" else s.C["norm"]
+        s.scr.addstr(y, 0, fit(f" {when} ", W - 1), s.C["dim"])
+        x = cells(when) + 2
+        if mark and x < W - 2:
+            s.scr.addstr(y, x, mark, s.C["ok" if mark == "✓" else "err"] | curses.A_BOLD)
+        if x + 2 < W - 1:
+            s.scr.addstr(y, x + bool(mark) * 2, fit(msg[2:] if mark else msg, W - 1 - x - bool(mark) * 2), body)
+
+    def paint_keys(s, y, W):  # mc's F-key bar: ten even slots, each the key's number, then its word on the bar
+        keys = fkeys()
+        slot, spans = max((W - 1) // len(keys), 1), []
+        for j, (n, w, m) in enumerate(keys):
+            x, num = j * slot, str(n)
+            s.scr.addstr(y, x, num[:slot], s.C["norm"] | curses.A_BOLD)
+            if slot > len(num):
+                s.scr.addstr(y, x + len(num), fit(w, slot - len(num)), s.C["bar"])
+            spans.append((x, x + slot, m))
+        s.spans["fbar"] = spans
 
     def frame(s):
         sc = s.scr
@@ -1205,6 +1241,8 @@ class App:
         A = H - 2 - logn  # the border's row
         with contextlib.suppress(curses.error):  # a cell off-screen mid-resize; the next frame fixes it
             s.paint_bar(0, [(f" {m} ", j) for j, m in enumerate(MENUS)], W, "menu")
+            if s.spans["menu"] and s.spans["menu"][-1][1] + cells(ME) + 3 < W:  # where you are, at the right
+                sc.addstr(0, W - 2 - cells(ME), ME, s.C["bar"])
             for r in s.rects:
                 s.paint_pane(*r, W)
             c = s.P.cur() if s.P.mode == "files" else None
@@ -1221,7 +1259,7 @@ class App:
             keep = logn - bool(s.working)  # the live line, when there is one, takes the last row
             shown = log[max(0, len(log) - keep - s.logoff):len(log) - s.logoff] if keep else []
             for k, ln in enumerate(shown):
-                sc.addstr(A + 1 + k, 0, fit(f" {ln}", W - 1), s.C["err" if "✗" in ln else "dim"])
+                s.paint_log(A + 1 + k, ln, W)
             s.paint_work()
             if s.typing:
                 hint = "⏎ apply  Esc clear" if s.typing == "/" else ""
@@ -1229,7 +1267,7 @@ class App:
                 sc.addstr(H - 1, 0, bar(q, hint, W), s.C["acc"] | curses.A_BOLD)
                 sc.move(H - 1, min(cells(q), W - 2))
             else:
-                s.paint_bar(H - 1, [(f"F{n} {w}", m) for n, w, m in fkeys()], W, "fbar")
+                s.paint_keys(H - 1, W)
 
     def act(s, fn, *a):  # run one action: errors are reported, the session stays
         t0 = time.monotonic()

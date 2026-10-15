@@ -40,6 +40,8 @@ class VT:  # a terminal (or a window on one) of H×W cells, its keys from a scri
             t.root.cells[t.y0 + y, t.x0 + x] = c
             x += cell(c)
 
+    insstr = addstr  # (the same check: a cell past the edge is an error)
+
     def move(t, y, x):
         if not (0 <= y < t.H and 0 <= x < t.W):
             t.fail(f"move {y},{x}")
@@ -240,7 +242,11 @@ view.view(SCR, b"", "empty", ui.MONO)
 # --- the app: what the pty test doesn't press, each checked ---
 os.chdir(W)
 app = start()
-assert "1 local:" in SCR.text() and "a.txt" in SCR.text(), SCR.text()
+assert "1  local:" in SCR.text() and "a.txt" in SCR.text(), SCR.text()
+more(app, "@", K.DOWN, (2, 5, CLICK))  # a tap on a host only selects it (a login is never one stray tap away)
+assert app.P.mode == "hosts" and app.P.cur()[2] is ui.LOCAL
+more(app, (2, 5, CLICK))  # the second opens it
+assert app.P.mode == "files"
 more(app, "@", K.F5)  # on the host list, a file action asks for a host
 assert "pick a host first" in log(app)
 more(app, "\x1b", "f")  # history: nothing further
@@ -347,7 +353,16 @@ assert "find stopped" in log(app)
 more(app, "\x1b", "/sub", "\n", ("kick", 1), "z")  # ^C mid-action: just that action
 assert "✗ stopped" in log(app)
 more(app, "\x0c")  # ^L: the whole screen drawn again
-assert "F10 quit" in SCR.text() and "1 local:" in SCR.text()
+assert "10quit" in SCR.text() and "1  local:" in SCR.text()
+app.busy("a long one")  # the spinner turns by itself while a call blocks (its timer's tick, run here by hand)
+spun = app.spun
+app.spin()
+assert app.spun == spun + 1 and "a long one" in SCR.text()
+app.drawing = True  # never mid-frame
+app.spin()
+assert app.spun == spun + 1
+app.drawing = False
+app.idle()
 more(app, "r", ("poll", 27))  # Esc while it runs: stopped there
 assert log(app).endswith("✗ stopped")
 more(app, K.END, "r", ("poll", ord("k")))  # anything else typed meanwhile: done after
