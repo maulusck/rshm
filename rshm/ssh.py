@@ -40,15 +40,16 @@ def logout():  # -O stop, not exit: a master still carrying a session (another r
         quiet([*argv(h), "-O", "stop", h["host"]])
 
 
-def connect(h, term, say, timeout=8):  # make sure h's master is up and logged in; term(cmd) runs cmd on the terminal
-    if quiet([*argv(h), "-O", "check", h["host"]])[0] == 0:
+def connect(h, tty, say, timeout=8, ask=True):  # h's master up and logged in; tty(fn, *a) runs fn with the terminal
+    if quiet([*argv(h), "-O", "check", h["host"]])[0] == 0:  # handed over: any login may need it (a gpg passphrase)
         return
     say(f"connecting {h['host']}…")
     (Path.home() / ".ssh").mkdir(mode=0o700, exist_ok=True)  # where the login sockets live
-    # quietly first: keys, the agent, or your own SSH_ASKPASS answer without a terminal (one try at a password)
-    rc, err = quiet([*argv(h, batch=not os.environ.get("SSH_ASKPASS"), timeout=timeout),
-                     "-o", "NumberOfPasswordPrompts=1", "-N", h["host"]])  # ControlPersist: backgrounds once in
-    if rc and (unreachable(err) or term([*argv(h, timeout=timeout), "-N", h["host"]]) != 0):
-        # else ssh asks in the terminal (new host key, 2FA, a password); a dead network won't take a typed one
+    # quietly first: keys, the agent, or your own SSH_ASKPASS answer without typing (one try at a password)
+    rc, err = tty(quiet, [*argv(h, batch=not os.environ.get("SSH_ASKPASS"), timeout=timeout),
+                          "-o", "NumberOfPasswordPrompts=1", "-N", h["host"]])  # ControlPersist: backgrounds once in
+    if rc and (not ask or unreachable(err) or tty(subprocess.call, [*argv(h, timeout=timeout), "-N", h["host"]]) != 0):
+        # else ssh asks (new host key, 2FA, a password); a dead network won't take a typed one.
+        # ponytail: ^C during a login waits for ssh's timeout (8 s); let ssh take the ^C if that wait bites
         raise ConnectionError(err if err.startswith(h["host"]) else f"{h['host']}: {err}")
     LOGINS.append(h)

@@ -313,6 +313,17 @@ for name, op in (("peek", lambda r: fs.peek(r, str(q / "ln"))), ("look", lambda 
         r.close()
 FAULT["at"] = set()
 
+# a source that can't be read: refused before anything is made at the other end
+DENY[:] = ["open"]
+r = remote()
+try:
+    fs.copy(r, str(q / "f"), Lo, str(d / "denied"), ticker())
+    raise AssertionError("read a refused file")
+except OSError:
+    assert not list(d.glob("denied*")), list(d.glob("denied*"))
+r.close()
+DENY[:] = []
+
 # a server that won't set modes or times: the files still arrive, whole
 DENY[:] = ["setstat", "fsetstat"]
 for a, b in ((Lo, remote()), (r := remote(), r)):
@@ -387,6 +398,7 @@ for name, mk in (("up", lambda: (Lo, remote())), ("down", lambda: (remote(), Lo)
         except KeyboardInterrupt:
             pass
         assert (d / "out" / "f").read_bytes() in (old, (small / "f").read_bytes()), (name, n)  # never half of it
+        assert not list((d / "out").rglob("*" + fs.PART)), (name, n)  # stopped: nothing of it left there
         FAULT["at"] = set()
         fs.copy(a, str(small), b, str(d / "out"), ticker())  # you try again
         assert sig(d / "out") == want and not list((d / "out").rglob("*" + fs.PART)), (name, n)

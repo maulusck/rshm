@@ -183,8 +183,24 @@ class SFTP:  # one session on the host's master: no remote shell, exact byte nam
             s.release(h)
         return out
 
+    def make(s, p, t, *args):  # a request that creates p: SFTP v3 says just "Failure" when p is there; say that
+        try:
+            return s.call(t, *args)
+        except OSError as e:
+            if isinstance(e, ConnectionError) or not s.there(p):
+                raise
+        raise FileExistsError(f"{p}: already exists")
+
+    def there(s, p):
+        try:
+            return s.stat(p, follow=False) is not None
+        except ConnectionError:
+            raise
+        except OSError:
+            return False
+
     def mkdir(s, p):
-        s.call(14, p, 0)
+        s.make(p, 14, p, 0)
 
     def rmdir(s, p):
         s.call(15, p)
@@ -203,12 +219,12 @@ class SFTP:  # one session on the host's master: no remote shell, exact byte nam
         return r.str().decode(errors="surrogateescape")
 
     def symlink(s, target, p):  # ponytail: OpenSSH's order, not the draft's; check the server's if another shows up
-        s.call(20, target, p)
+        s.make(p, 20, target, p)
 
     def hardlink(s, src, p):
         if b"hardlink@openssh.com" not in s.ext:
             raise OSError("this server can't make hard links")
-        s.call(200, "hardlink@openssh.com", src, p)
+        s.make(p, 200, "hardlink@openssh.com", src, p)
 
     def free(s, p):  # bytes free for you there, None if the server won't say
         if b"statvfs@openssh.com" not in s.ext:
@@ -219,7 +235,7 @@ class SFTP:  # one session on the host's master: no remote shell, exact byte nam
 
     def rename(s, a, b, replace=True):  # replace: atomically where the server can (OpenSSH), else remove then rename
         if not replace:
-            return s.call(18, a, b)  # plain SFTP rename refuses to overwrite
+            return s.make(b, 18, a, b)  # plain SFTP rename refuses to overwrite
         if b"posix-rename@openssh.com" in s.ext:
             return s.call(200, "posix-rename@openssh.com", a, b)
         try:

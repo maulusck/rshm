@@ -73,27 +73,46 @@ def bar(left, right, W, keep="end"):  # a status line W-1 cells wide: right kept
     return fit(left, max(W - 1 - cells(right), 0), keep) + right
 
 
-def readline(scr, q, text="", attr=0, back=None):  # on the bottom row: ⏎ takes the line as typed, Esc or ^C
-    curses.curs_set(1)                                # cancels (None), ^U clears it; back() repaints what's behind
+def line(scr, q, text="", attr=0, back=None, ends=()):  # the one-line editor on the bottom row -> (text, the key that
+    i = len(text)                                      # ended it: ⏎, Esc (^C too), or one of ends); back() repaints
+    curses.curs_set(1)                                 # what's behind it. ← → Home End Del ^A ^E ^K ^U ^W edit
     try:
         while True:
             back and back()
             H, W = scr.getmaxyx()
+            col = cells(f" {q} {text[:i]}")
+            start = max(0, col - W + 2)  # sideways, to keep the cursor in sight
             with contextlib.suppress(curses.error):  # a terminal too small for it: what fits shows
-                scr.addstr(H - 1, 0, fit(f" {q} {text}", W - 1), attr)
-                scr.move(H - 1, max(0, min(cells(f" {q} {text}"), W - 2)))
+                scr.addstr(H - 1, 0, span(safe(f" {q} {text}"), start, max(W - 1, 0)), attr)
+                scr.move(H - 1, max(0, min(col - start, W - 2)))
             c = scr.get_wch()
-            if c in ("\n", "\r", curses.KEY_ENTER):
-                return text
+            if c in ("\n", "\r", curses.KEY_ENTER) or c in ends:
+                return text, "\n" if c in ("\r", curses.KEY_ENTER) else c
             if c in ("\x1b", "\x03"):
-                return None
-            if c in (curses.KEY_BACKSPACE, "\x7f", "\b"):
-                text = text[:-1]
-            elif c == "\x15":
-                text = ""
+                return text, "\x1b"
+            if c in (curses.KEY_BACKSPACE, "\x7f", "\b") and i:
+                text, i = text[:i - 1] + text[i:], i - 1
+            elif c == curses.KEY_DC:
+                text = text[:i] + text[i + 1:]
+            elif c in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                i = max(0, min(len(text), i + (1 if c == curses.KEY_RIGHT else -1)))
+            elif c in (curses.KEY_HOME, "\x01", curses.KEY_END, "\x05"):
+                i = 0 if c in (curses.KEY_HOME, "\x01") else len(text)
+            elif c == "\x0b":  # ^K: to the end
+                text = text[:i]
+            elif c == "\x15":  # ^U: to the start
+                text, i = text[i:], 0
+            elif c == "\x17":  # ^W: the word before
+                j = text[:i].rstrip(" ").rfind(" ") + 1
+                text, i = text[:j] + text[i:], j
             elif isinstance(c, str) and c.isprintable():
-                text += c
+                text, i = text[:i] + c + text[i:], i + 1
     except KeyboardInterrupt:
-        return None
+        return text, "\x1b"
     finally:
         curses.curs_set(0)
+
+
+def readline(scr, q, text="", attr=0, back=None):  # ⏎ takes the line as typed, Esc or ^C cancels (None)
+    text, k = line(scr, q, text, attr, back)
+    return text if k == "\n" else None

@@ -27,7 +27,7 @@ Windows OpenSSH, Dropbear with sftp-server, SFTP-only and chrooted accounts).
 *notes.md                 4.1K │ config.toml           1K  colour by kind, from the theme
 └─ -rw-r--r-- 1 me:me 4.1K 2026-10-14 16:22 notes.md ─────┘ the entry under the cursor, ls -l style
  16:22:05 ✓ → notes.md  4.1K in 0s                         the log: wheel or [ ] scroll it
-F1 help F2 commands F3 view F4 edit F5 copy … F10 quit      mc's F-keys: press or tap
+F1 help F2 menu F3 view F4 edit F5 copy … F10 quit          mc's F-keys: press or tap
 ```
 
 Each pane shows a folder, here or on a host, or the host list (`@`, or tap its title). The panes sit side by side,
@@ -44,15 +44,16 @@ one above the other when the terminal stands upright (a phone, Termux), one at a
 | `F3` `v` · `F4` `e` · `i` | view · edit (on the host list: the config) · info |
 | `F5` `c` · `F6` `m` | copy · move to the other pane (mode and times travel; links stay links) |
 | `F7` `n` · `F8` `x` `Del` · `R` | new folder · delete · rename |
-| `A` · `L` · `H` · `z` | attributes `644 me:staff 2026-10-14 16:22` · symlink (on a link: retarget) · hard link · size |
+| `A` · `L` · `H` · `z` | attributes: mode, owner, time, one row each · symlink to the entry, where you say (on a link: where it points) · hard link, where you say · size |
 | `Space` `Ins` · `*` · `+` `-` · `D` | mark · all / none · by pattern · what differs from the other pane |
 | `S` · `.` · `/` · `^F` | sort: name, extension, size, date, reverse · dotfiles · filter (`⏎` applies) · find |
 | `b` `f` · `g` · `~` · `o` · `^U` | history back / forward · go to · home · other pane here · swap panes |
-| `F2` · `^O` `s` · `p` | your `[commands]` · shell here (on the host list: on that host) · live check |
-| `Tab` · `@` · `Esc` · `r` · `t` · `[` `]` · `F10` `q` | other pane · host list · clear / back · reload · theme · log · quit |
+| `F2` · `^O` `s` · `p` | menu of what's under the cursor, your `[commands]` last · shell here (on the host list: on that host) · live check (never asks for a login) |
+| `Tab` · `@` · `Esc` · `r` · `t` · `[` `]` · `^L` · `F10` `q` | other pane · host list · back: filter, marks, find results, host list; stops what's running · reload · theme · log · draw the screen again · quit |
 
-Mouse and touch: tap selects, a second tap opens (a host opens at once); right-click opens the menu of what's under
-it; the wheel scrolls panes, the log, menus, viewer and editor. The viewer has less's keys (`space` `b` `g` `G`
+Every question line edits like a shell's: `←` `→` `Home` `End` `Del`, `^A` `^E` `^K` `^U` `^W`; in a form, `↑` `↓` `Tab`
+move between rows. Mouse and touch: tap selects, a second tap opens (a host opens at once); right-click opens the
+menu of what's under it (`F2`); the wheel scrolls panes, the log, menus, viewer and editor. The viewer has less's keys (`space` `b` `g` `G`
 `/` `?` `n` `N`, `N g` for line N, `w` wrap, `x` hex), the editor nano's (`^S` save, `^X` exit, `^W` find,
 `^\` replace, `^K` `^U` cut and paste lines, `^_` line, `^Z` undo).
 
@@ -90,11 +91,13 @@ view = ""                                 # "less -R", "bat --paging=always"
 | Area | What it does |
 |---|---|
 | Copy, move | between any two panes: here ↔ host, host ↔ host (through this machine), within one host (by the server itself on OpenSSH 9.0+), out of archives; like `cp -pP`: mode and times travel, links stay links; a folder into a folder merges, asking first if anything gets replaced; a move within one file system is a rename |
-| Transfers | byte for byte; each file travels as `NAME.rshm-part`, renamed into place when complete, so a target is always whole: the old file or the new; a replaced file keeps its mode; a dropped link reconnects and resumes (a part is resumed only if its last bytes are the source's); `Ctrl-C` stops, starting again resumes |
+| Transfers | byte for byte; each file travels as `NAME.rshm-part`, renamed into place when complete, so a target is always whole: the old file or the new; a replaced file keeps its mode; the source is opened before anything is made at the other end (one you can't read leaves nothing there); a dropped link reconnects and resumes (a part is resumed only if its last bytes are the source's) |
+| Stopping | `Esc` stops whatever runs (a copy, a fetch, a load, a find) at its next step, `Ctrl-C` at once; a stopped copy leaves no part behind, files already copied stay |
 | Attributes | `A`: mode, owner, time of the marked entries (or the one under the cursor); only what you change is applied; names or numbers, on a host as its own listing shows them |
-| View, edit | built in: a host's file is read into memory and saved straight back; your tools (`[tools]`, else `$VISUAL` `$EDITOR` `$PAGER`) get a private local copy (of what a link points to), saved back only if changed; loading or fetching over 50 MB asks first |
+| View, edit | your `[open]` pattern if one matches; text to your tools (`[tools]`, else `$VISUAL` `$EDITOR` `$PAGER`), on a private local copy of a host's file (of what a link points to), saved back only if changed; a binary file never goes to an editor or a text tool: rshm's viewer shows it in hex. rshm's own viewer shows a file's first MB (any size, at once), its editor takes text up to a MB and saves straight back |
 | Archives | zip, jar, tar, tar.gz / bz2 / xz open like folders, read-only, nested too; a host's is copied here first, removed on the way out; damage is an error, never silently wrong bytes (checked by each format's own checksum) |
-| Logins | one per host, shared by both panes and every transfer; tried quietly first (keys, agent, your `SSH_ASKPASS`), else ssh asks in the terminal |
+| Links | `L` and `H` ask one thing, where the new name goes (the other pane's folder offered); the entry under the cursor is what it names. A symlink is relative (it still points right when the tree moves); a hard link is the same file under another name, so nothing marks it apart: `i` shows how many names a file has. A name already taken is said so |
+| Logins | one per host, shared by both panes and every transfer; tried quietly first (keys, agent, your `SSH_ASKPASS`), else ssh asks; either way with the terminal handed over, so a passphrase prompt (gpg-agent's pinentry too) gets a clean screen and rshm's is drawn whole after |
 | Exit | quitting, `kill` or a closed terminal ends every login rshm started and removes its copies |
 
 ## Limits
@@ -108,6 +111,8 @@ view = ""                                 # "less -R", "bat --paging=always"
 | plain `.tar` | has no checksum: damage inside one can't be noticed (tar.gz, bz2, xz and zip have theirs) |
 | find | names only; contents: `grep` through F2 or the shell |
 | `kill -9` | logins linger until 5 idle minutes pass |
+| `Ctrl-C` during a login | waits for ssh's own timeout (8 s): the terminal is the login's then |
+| root-only files | as the user your ssh config logs in as: no sudo; a host alias logging in as root reaches them |
 
 ## Code
 

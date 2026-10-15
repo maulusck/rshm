@@ -54,7 +54,7 @@ class Term:  # one rshm in a pseudo terminal, its screen kept by pyte
         if not t.pid:
             os.chdir(cwd)
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-            os.environ["TERM"] = TERM
+            os.environ["TERM"], os.environ["GPG_TTY"] = TERM, os.ttyname(0)
             os.environ.pop("PYTHONPATH", None)
             run = os.environ.get("RSHM_RUN", sys.executable).split()  # RSHM_RUN: a python to run it with (a tracer)
             os.execvp(run[0], [*run, str(T / "rshm.pyz"), *args])  # finds rshm.toml beside it
@@ -130,7 +130,7 @@ try:
     t = Term([], B)
     rows = lambda s: s.split("\n")
     left = lambda s: "\n".join(r.split("│")[0] for r in rows(s)[2:])  # pane 1's rows, side by side
-    t.until(lambda s: " 1 local:" in s and "note.txt" in s and "2 hosts" in s and "F9 menu" in s, "menus, pane 1 here, pane 2 hosts")
+    t.until(lambda s: " 1 local:" in s and "note.txt" in s and "2 hosts" in s and "F9 bar" in s, "menus, pane 1 here, pane 2 hosts")
     t.keys("Tab", "Enter", "g", "^U", str(D), "Enter", "Tab")  # pane 2: this machine too, in dst
     t.until(lambda s: f"2 local:{D}" in s, "pane 2 in dst")
 
@@ -159,18 +159,21 @@ try:
     t.keys("F8", "y")
     t.until(lambda s: "✓ deleted renamed/" in s and not (B / "renamed").exists(), "deleted")
 
-    t.keys("/note", "Enter", "L", "^U", str(B / "ln.txt"), "Enter", "Enter")  # a symlink, then retarget it; a hard link
+    t.keys("/note", "Enter", "L", "^U", str(B / "ln.txt"), "Enter")  # a symlink: one question, where; then retarget it
     t.until(lambda s: (B / "ln.txt").is_symlink(), "symlink")
-    assert os.readlink(B / "ln.txt") == str(B / "note.txt")
+    assert os.readlink(B / "ln.txt") == "note.txt"  # relative to where it is
     t.keys("Esc", "/ln.t", "Enter")
-    t.until(lambda s: f"ln.txt -> {B}/note.txt" in s.split("└─")[1] and "ln.txt@ -> " in left(s), "target: row and ls -l line")
+    t.until(lambda s: "ln.txt -> note.txt" in s.split("└─")[1] and "ln.txt@ -> note.txt" in left(s), "target: row and ls -l line")
     t.keys("i")
-    t.until(lambda s: f"points to  {B}/note.txt" in s, "target: info")
+    t.until(lambda s: "points to  note.txt" in s, "target: info")
     t.keys("q")
-    t.keys("L", "^U", "note.txt", "Enter")
-    t.until(lambda s: os.readlink(B / "ln.txt") == "note.txt", "retargeted")
+    t.keys("L", "^U", "data.zip", "Enter")
+    t.until(lambda s: os.readlink(B / "ln.txt") == "data.zip", "retargeted")
     t.keys("Esc", "/note", "Enter", "H", "^U", str(B / "hard.txt"), "Enter")
     t.until(lambda s: (B / "hard.txt").exists() and (B / "hard.txt").stat().st_ino == (B / "note.txt").stat().st_ino, "hard link")
+    t.keys("i")  # a hard link: nothing marks it apart (it is the same file); info says how many names it has
+    t.until(lambda s: "links  2: the same file under 2 names (hard links)" in s, "info: hard links")
+    t.keys("q")
     t.keys("Esc")
 
     (B / "mv" ).mkdir()  # the guards: into itself, two of one name, a folder merge on move, a tree with a pipe, a pipe
@@ -256,7 +259,7 @@ try:
     t.until(lambda s: "data.zip" in s and "data.zip:/" not in s and "[" not in rows(s)[1].split("┬")[0], "out, unmarked")
     t.keys("Esc", "/m.mark", "Enter", "Enter")  # [open] runs your command
     t.until(lambda s: "F10 quit" in s and (B / "m.marker.opened").exists(), "[open]")
-    t.keys("Esc", "/note", "Enter", "F2", "Enter", "Enter")  # F2: a [commands] entry, then a wait for ⏎
+    t.keys("Esc", "/note", "Enter", "F2", "Up", "Enter", "Enter")  # F2: the menu; ↑ wraps to your [commands], last; a wait for ⏎
     t.until(lambda s: (B / "menu.out").exists(), "F2 command")
     assert (B / "menu.out").read_text() == "hi note.txt\n"
     t.keys("^O")  # a shell here
@@ -291,7 +294,7 @@ try:
     if MOUSE:  # taps: bar, menu item, F-key bar, titles, rows, right-click (no mouse in this terminal: keys only)
         t.click(0, rows(t.text())[0].index("Options") + 1)
         t.until(lambda s: "edit config" in s and "theme" in s, "Options by a tap")
-        y = next(i for i, r in enumerate(rows(t.text())) if "dotfiles" in r or "theme" in r and "│" in r)
+        y = next(i for i, r in enumerate(rows(t.text())) if __import__("re").search(r"theme +t ", r))
         t.click(y, rows(t.text())[y].index("theme") + 1)
         t.until(lambda s: "theme: amber" in s, "an item by a tap")
         t.click(len(rows(t.text())) - 1, rows(t.text())[-1].index("F7 mkdir") + 1)  # the F-key bar answers taps
@@ -364,7 +367,9 @@ try:
                                        "Host direct\n\tHostName 127.0.0.1\nHost jumped\n\tHostName localhost\n\tProxyJump direct\n")
     # ssh reads the real user's ~/.ssh/config, not $HOME's: point it at this one (jump children get -F too)
     (T / "bin").mkdir()
-    (T / "bin" / "ssh").write_text(f'#!/bin/sh\nexec {shutil.which("ssh")} -F {T}/.ssh/config "$@"\n')
+    (T / "bin" / "ssh").write_text(  # a login also gets a gpg-agent-like prompt, written straight onto the terminal
+        f'#!/bin/sh\ncase " $* " in *" -N "*) printf "\\033[1;20HPINENTRY-WAS-HERE" > "$GPG_TTY";; esac\n'
+        f'exec {shutil.which("ssh")} -F {T}/.ssh/config "$@"\n')
     (T / "bin" / "ssh").chmod(0o755)
     os.environ["PATH"] = f"{T}/bin:{os.environ['PATH']}"
     sockets = lambda: sorted(p.name for p in (T / ".ssh").glob("rshm-" + "[0-9a-f]" * 16))
@@ -379,7 +384,8 @@ try:
         (T / "remote" / "r.txt").write_text("remote\n")
         (T / "remote" / "r.lnk").symlink_to("r.txt")
         t = Term(["jumped"], L)  # `rshm jumped`: the host on the right, this machine on the left
-        t.until(lambda s: "jumped:/" in s and "big.bin" in s, "both panes")
+        t.until(lambda s: "jumped:/" in s and "big.bin" in s and "PINENTRY" not in s, "both panes, nothing left over")
+        assert b"PINENTRY-WAS-HERE" in b"".join(t.raw)  # it was written, and drawn over
         assert len(sockets()) == 1, sockets()
         t.keys("Tab", "/big", "Enter", "c", "^U", str(T / "remote"), "Enter")  # copy with the keys
         t.until(lambda s: "✓ → big.bin" in s, "copied")
@@ -408,7 +414,7 @@ try:
         assert sockets() == [], f"the screen left logins behind: {sockets()}"
 
         h = config.find(config.hosts(config.read(T / "rshm.toml")), "jumped")[0][1]
-        R, Lo = fs.Remote(h, term=lambda cmd: 1, say=lambda m: None), fs.Local()
+        R, Lo = fs.Remote(h, tty=lambda fn, *a: fn(*a), say=lambda m: None), fs.Local()
         tick = lambda *a, **k: None
         for src, sp, dst, dp in ((Lo, L, R, T / "remote" / "t"), (R, T / "remote" / "t", Lo, T / "down"),
                                  (R, T / "remote" / "t" / "big.bin", R, T / "remote" / "same.bin")):  # the last within one host

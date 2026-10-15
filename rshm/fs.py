@@ -12,7 +12,7 @@ tar, read-only). Everything a pane does goes through these primitives, so copy, 
 attrs: {"size", "perm", "mtime", "uid", "gid", "user", "group", "nlink"}, each only when known; look() adds a link's
 "target" and "dest" (what it points to; None when nothing).
 """
-import functools, grp, lzma, os, posixpath, pwd, re, shlex, stat, tarfile, time, zipfile, zlib
+import contextlib, functools, grp, itertools, lzma, os, posixpath, pwd, re, shlex, stat, tarfile, time, zipfile, zlib
 from collections import defaultdict
 
 from .sftp import CHUNK, SFTP
@@ -161,8 +161,8 @@ class Remote:  # a host; its SFTP session opens on first use and reopens after a
     PRIMS = {"stat", "listdir", "readlink", "free", "mkdir", "rmdir", "unlink", "rename", "symlink", "hardlink", "chattr",
              "read", "write"}
 
-    def __init__(s, h, term, say):
-        s.h, s.term, s.say, s.sf, s.name = h, term, say, None, h["host"]
+    def __init__(s, h, tty, say):  # tty(fn, *a): fn run with the terminal handed over; say(what): what's going on
+        s.h, s.tty, s.say, s.sf, s.name = h, tty, say, None, h["host"]
 
     def sftp(s):
         if not (s.sf and s.sf.alive()):
@@ -171,8 +171,8 @@ class Remote:  # a host; its SFTP session opens on first use and reopens after a
             s.sf = SFTP(s.h).init()
         return s.sf
 
-    def login(s):  # the host's master, logged in (a password or host key may need the terminal)
-        connect(s.h, s.term, s.say)
+    def login(s):  # the host's master, logged in
+        connect(s.h, s.tty, s.say)
 
     def __getattr__(s, n):  # the primitives are the session's own
         if n not in Remote.PRIMS:
@@ -194,7 +194,7 @@ class Remote:  # a host; its SFTP session opens on first use and reopens after a
             s.sf.close()
 
     def twin(s):  # a second session to the same host, on the same login
-        return Remote(s.h, s.term, s.say)
+        return Remote(s.h, s.tty, s.say)
 
 
 class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a folder; Python reads them all itself
@@ -407,14 +407,20 @@ def _copy(src, sp, dst, dp, tick, a, there, here):
         off = 0
     ch = keep(a) | {"perm": ((old or a).get("perm") or 0o644) & 0o777}
     tick(sp, off, resumed=True)
-    if here:
-        dst.sftp().copy_data(sp, dp + PART, off, ch)
-        tick(sp, size)
-    else:
-        chunks = src.read(sp, off, size)
-        try:
-            dst.write(dp + PART, chunks, off, ch, lambda at: tick(sp, at))
-        finally:
-            chunks.close()
-    dst.rename(dp + PART, dp)  # ponytail: a replaced file is now the copier's; chown from old if root needs it
+    try:
+        if here:
+            dst.sftp().copy_data(sp, dp + PART, off, ch)
+            tick(sp, size)
+        else:
+            chunks = src.read(sp, off, size)
+            try:  # the source open (readable) before anything is made over there
+                first = list(itertools.islice(chunks, 1))
+                dst.write(dp + PART, itertools.chain(first, chunks), off, ch, lambda at: tick(sp, at))
+            finally:
+                chunks.close()
+        dst.rename(dp + PART, dp)  # ponytail: a replaced file is now the copier's; chown from old if root needs it
+    except KeyboardInterrupt:  # stopped by you: nothing of it stays there (a lost link keeps it, to resume)
+        with contextlib.suppress(OSError):
+            dst.unlink(dp + PART)
+        raise
     tick.finished.add(sp)

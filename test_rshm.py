@@ -141,8 +141,8 @@ assert ui.lcwd() == str(Path.home())
 # one key table: every action exists, no key bound twice; menus, the F-key bar and --help come from it
 bound = [c for _, keys, _, m in ui.KEYS if m for c in ui.codes(keys)]
 assert len(bound) == len(set(bound)) and all(callable(getattr(ui.App, m, None)) for *_, m in ui.KEYS if m)
-assert [f"F{n} {w}" for n, w, _ in ui.fkeys()] == ["F1 help", "F2 commands", "F3 view", "F4 edit", "F5 copy", "F6 move",
-                                                  "F7 mkdir", "F8 delete", "F9 menu", "F10 quit"]  # mc's ten, mc's order
+assert [f"F{n} {w}" for n, w, _ in ui.fkeys()] == ["F1 help", "F2 menu", "F3 view", "F4 edit", "F5 copy", "F6 move",
+                                                  "F7 mkdir", "F8 delete", "F9 bar", "F10 quit"]  # mc's ten, mc's order
 assert all(ui.menu_rows(m) for m in ui.MENUS) and {r[0] for r in ui.KEYS} - {None} == {"Pane", "File", "Mark", "Command", "Options"}
 assert ui.menu_rows("Pane 1") == ui.menu_rows("Pane 2") and "copy to the other pane" in ui.keys_help()
 assert all(len(th) == len(ui.ROLES) and all(-1 <= c < 256 for x in th for c in x[:2]) for th in ui.THEMES.values())
@@ -282,11 +282,18 @@ if srv:
     for f in (R, Lo):  # rename: replaces by default, refuses when told not to
         (D / "a").write_text("a")
         (D / "b").write_text("b")
-        try:
-            f.rename(str(D / "a"), str(D / "b"), replace=False)
-            raise AssertionError("rename overwrote")
-        except OSError:
-            pass
+        for make in (lambda: f.rename(str(D / "a"), str(D / "b"), replace=False), lambda: f.mkdir(str(D / "b")),
+                     lambda: f.symlink("x", str(D / "b")), lambda: f.hardlink(str(D / "a"), str(D / "b"))):
+            try:  # whatever creates a name that's taken says so (SFTP's own word is just "Failure")
+                make()
+                raise AssertionError("created over an existing name")
+            except FileExistsError as e:
+                assert "exists" in str(e) and (D / "b").read_text() == "b", e
+        try:  # a failure for another reason stays what it is
+            f.mkdir(str(D / "nope" / "x"))
+            raise AssertionError("made in a folder that isn't there")
+        except OSError as e:
+            assert not isinstance(e, FileExistsError), e
         f.rename(str(D / "a"), str(D / "b"))
         assert (D / "b").read_text() == "a" and not (D / "a").exists()
     (D / "t" / "rloop").symlink_to(D / "t")  # a host tree back down, with a link loop, a dangling link, a pipe
@@ -611,13 +618,20 @@ assert fs.names(0, 4_000_000_000)[1] == "4000000000" and fs.names(4_000_000_000,
 calls = []
 ssh.quiet = lambda cmd: calls.append(cmd) or (0 if cmd[-2:] == ["check", "up"] else 255,
                                              "ssh: Could not resolve hostname x" if cmd[-1] == "x" else "denied")
+handed = []  # every login attempt runs with the terminal handed over: a gpg or ssh prompt gets it whole
+tty = lambda fn, *a: handed.append(a[0][-1]) or (term if fn is subprocess.call else fn(*a))
 for host, term, ok in (("up", 1, True), ("x", 0, False), ("y", 1, False), ("z", 0, True)):
     try:
-        ssh.connect({"host": host}, lambda cmd: term, lambda m: None)
+        ssh.connect({"host": host}, tty, lambda m: None)
         assert ok, host
     except OSError as e:
         assert not ok and host in str(e), (host, e)
-assert ssh.LOGINS == [{"host": "z"}]
+assert ssh.LOGINS == [{"host": "z"}] and handed == ["x", "y", "y", "z", "z"]  # "up" was in already
+try:  # asked not to ask (the live check): no terminal login, the refusal is the answer
+    ssh.connect({"host": "w"}, tty, lambda m: None, ask=False)
+    raise AssertionError("asked")
+except ConnectionError as e:
+    assert "denied" in str(e) and handed[-1] == "w" and len(handed) == 6
 ssh.LOGINS.clear()
 
 # progress: how far, how fast, how long still, once a quarter second at most
@@ -629,7 +643,7 @@ tk("a", 2048)
 tk.finished.add("a")
 tk("b", 1024)
 ui.time = time
-assert said[-1].startswith("↑ x  3.0K of 4.0K 75%") and "1 files" in said[-1] and "^C stops" in said[-1], said
+assert said[-1].startswith("↑ x  3.0K of 4.0K 75%") and "1 files" in said[-1] and "Esc stops" in said[-1], said
 
 shutil.rmtree(d)
 print("ok")

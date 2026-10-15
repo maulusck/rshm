@@ -2,7 +2,7 @@
 """The whole app in this process, on a strict virtual terminal (a write past any edge is an error, also where the
 app would hide one): scripted keys for the paths the pty test doesn't press, then a monkey of random keys, taps and
 sizes (RSHM_SEED, RSHM_MONKEY steps). Jailed: no write lands outside a temp sandbox, nothing reaches the network."""
-import builtins, collections, curses as real, os, random, re, shutil, tempfile, types, zipfile
+import builtins, collections, curses as real, os, random, re, shutil, tempfile, time, types, zipfile
 from pathlib import Path
 
 BOX = Path(tempfile.mkdtemp(prefix="rshm-app-")).resolve()
@@ -24,7 +24,7 @@ class VT:  # a terminal (or a window on one) of H×W cells, its keys from a scri
     def __init__(t, H, W, y=0, x=0, root=None):
         t.H, t.W, t.y0, t.x0, t.root = H, W, y, x, root or t
         if not root:
-            t.keys, t.mouse, t.cells, t.kick = collections.deque(), None, {}, 0
+            t.keys, t.mouse, t.cells, t.kick, t.nd = collections.deque(), None, {}, 0, False
 
     def fail(t, what):
         ERRORS.append(f"{what} at {t.root.H}x{t.root.W}")
@@ -69,6 +69,7 @@ class VT:  # a terminal (or a window on one) of H×W cells, its keys from a scri
     def get_wch(t):
         r = t.root
         if not r.keys:
+            r.final = r.text()  # the screen as the keys ran out: whatever was on it, a viewer too
             raise Done
         k = r.keys.popleft()
         if k == "^C":
@@ -86,7 +87,13 @@ class VT:  # a terminal (or a window on one) of H×W cells, its keys from a scri
             return real.KEY_MOUSE
         return k
 
+    def nodelay(t, flag):  # a peek mid-action: only ("poll", key) in the script is typed by then
+        t.root.nd = flag
+
     def getch(t):
+        r = t.root
+        if r.nd:
+            return r.keys.popleft()[1] if r.keys and isinstance(r.keys[0], tuple) and r.keys[0][0] == "poll" else -1
         k = t.get_wch()
         return ord(k) if isinstance(k, str) else k
 
@@ -112,7 +119,7 @@ FAKE = types.SimpleNamespace(**{k: getattr(real, k) for k in dir(real) if k.isup
                              newwin=newwin, getmouse=getmouse, has_colors=lambda: True, color_pair=lambda i: i << 8,
                              curs_set=nop, set_escdelay=nop, mouseinterval=nop, mousemask=nop, start_color=nop,
                              use_default_colors=nop, init_pair=nop, raw=nop, noraw=nop, cbreak=nop, flushinp=nop,
-                             endwin=nop, doupdate=nop)
+                             endwin=nop, doupdate=nop, ungetch=lambda k: SCR.keys.appendleft(chr(k) if k < 256 else k))
 for m in (ui, edit, view, screen):
     m.curses = FAKE
 
@@ -121,7 +128,7 @@ class Jail(fs.Local):  # this machine, but every write stays in the sandbox (thr
     def inside(s, *ps, real=False):
         for p in ps:
             q = os.path.realpath(p) if real else os.path.join(os.path.realpath(os.path.dirname(p) or "."), os.path.basename(p))
-            if not (q + "/").startswith(str(BOX) + "/"):
+            if not q.startswith(str(BOX) + "/"):  # strictly inside: the sandbox itself is off limits too
                 raise PermissionError(f"jail: {p}")
 
     def mkdir(s, p): s.inside(p); super().mkdir(p)
@@ -161,7 +168,7 @@ def start(*keys, H=30, W=120):  # a fresh rshm on a fresh screen, run until its 
         app.loop()
     except (Done, SystemExit):
         pass
-    app.draw()
+    app.paint()
     return app
 
 
@@ -169,11 +176,11 @@ def more(app, *keys):  # the same rshm, more keys
     SCR.keys.extend(k for ks in keys for k in ([*ks] if isinstance(ks, str) and ks != "^C" else [ks]))
     try:
         while True:
-            app.draw()
+            app.paint()
             app.act(app.key, SCR.getch())
     except (Done, SystemExit):
         pass
-    app.draw()
+    app.paint()
     return app
 
 
@@ -213,6 +220,12 @@ assert saved[-1] == b"zq"
 SCR.keys.extend(["z", "\x13", "\x18", "y", "\x18", "n"])
 edit.edit(SCR, b"q", "q", ui.MONO, lambda b: (_ for _ in ()).throw(OSError("disk full")))  # shown, not left
 
+# --- the question line: edits in place (^W a word, ^K to the end, ^A ^E the ends), scrolls sideways when narrow ---
+for H, Wd in ((5, 60), (2, 9)):
+    SCR = VT(H, Wd)
+    SCR.keys.extend(["\x17", *[K.LEFT] * 4, "\x0b", "X", "\x01", "\x05", "\n"])
+    assert screen.readline(SCR, "q:", "one two three") == "one X"
+
 # --- the viewer: every key, text and hex, at any size ---
 for H, Wd in ((30, 120), (4, 10), (1, 1)):
     SCR = VT(H, Wd)
@@ -238,11 +251,13 @@ assert app.P.files.flt == "a." and app.P.cur()[0] == "a.txt"
 more(app, "\x1b", "\x06", "\x15", "\n")  # ^F with no pattern: nothing
 more(app, "\x06", "\n")  # ^F *: everything below, found
 assert app.P.found == "*" and any(n == "sub" for n, _ in app.P.items)
-more(app, "\x1b", "D")  # the other pane shows hosts: nothing to compare with
+assert "Esc goes back" in log(app)
+more(app, "\x1b", "D")  # Esc: out of find results, back in the folder  # the other pane shows hosts: nothing to compare with
 assert "the other pane shows no folder" in log(app)
 more(app, K.DOWN, "c")
 assert "the other pane shows no folder: pick one" in log(app)
-more(app, "h", "/z.zip", "\n", "\n", "o")  # inside an archive: no mirror; F6 refused; @ and a host leaves it
+assert not app.P.found
+more(app, "/z.zip", "\n", "\n", "o")  # inside an archive: no mirror; F6 refused; @ and a host leaves it
 assert "not from inside an archive" in log(app)
 more(app, "\t", "\n", "\t", K.DOWN, K.F6)
 assert "an archive is read-only" in log(app)
@@ -266,15 +281,22 @@ assert "No such file" in log(app)
 more(app, "c", "\x15", str(W / "sub"), "\n", "n")  # a clash, and no: nothing
 assert (W / "sub" / "a.txt").read_text() == "other"
 more(app, "c", "\x15", "\n")  # an empty answer: nothing
-more(app, "A", "\x15", *"zz", "\n")
-assert "not like" in log(app)
-more(app, "A", "\x15", *"644 nobody:nogroup", "\n")
-assert "nobody" in log(app) or "no user" in log(app) or "Operation" in log(app) or "✓" in log(app).split("\n")[-1]
-more(app, "A", "\x15", *"644 99999999:0", "\n", "A", "\x15", *"644 :root", "\n", "A", "\x15", *"644 nouser_x:", "\n")
-assert "nouser_x: no user by that name here" in log(app)
+more(app, "A", "\x15", *"zz", "\n")  # A: a form, one row per attribute; only the rows you change are applied
+assert "mode zz: not like 6" in log(app)
+more(app, "A", K.DOWN, "\x15", *"nobody:nogroup", "\n")
+assert "✓ owner nobody:nogroup" in log(app) and (W / "a.txt").stat().st_uid != 0
+mode = (W / "a.txt").stat().st_mode
+more(app, "A", K.DOWN, "\x15", *"99999999:0", "\n", "A", K.DOWN, "\x15", *":root", "\n", "A", "\t", "\x15", *"nouser_x:", "\n")
+assert "nouser_x: no user by that name here" in log(app) and (W / "a.txt").stat().st_mode == mode
+more(app, "A", K.UP, "\x15", *"2001-09-09 01:46", K.UP, K.UP, "\x15", *"600", K.DOWN, K.DOWN, "\n")  # ↑ wraps round
+assert (W / "a.txt").stat().st_mode & 0o777 == 0o600 and time.localtime((W / "a.txt").stat().st_mtime)[:5] == (2001, 9, 9, 1, 46)
+more(app, "A", K.LEFT, K.LEFT, "\x7f", "0", K.HOME, "\x05", K.RIGHT, K.DC, "\x1b")  # the line edits in place; Esc: nothing
+assert (W / "a.txt").stat().st_mode & 0o777 == 0o600
 more(app, "R", "\x15", "\n", "L", "\x15", "\n", "H", "\x15", "\n", "z")  # empty answers: nothing
 more(app, "/bin", "\n", K.F3, "q", K.F4, "\x18")  # binary opens as hex; edited as is
-more(app, K.F2, K.DOWN, "\x1b")
+RAN.clear()
+more(app, "/a.txt", "\n", K.F2, K.END, "\n")  # F2: what can be done here, then your [commands]
+assert RAN and RAN[-1][0][-1].startswith("ls a.txt;"), RAN
 CFG.write_text("theme = [\n")  # a broken config: said, the app goes on with what it had
 more(app, "r")
 assert "config:" in log(app)
@@ -295,22 +317,42 @@ for i in (0, 1):  # both panes here, the first one focused
 app.focus = 0
 more(app, "/bin.dat", "\n", "c", "\x15", str(W / "lnd"), "\n")
 assert (W / "sub" / "bin.dat").exists()
-more(app, "\x1b", K.HOME, "L", "H", "A", "\n", "A", "\x15", "\n", K.F2)  # on ..: nothing; F2 with no [commands]
-assert "no [commands]" in log(app)
+more(app, "\x1b", "/a.txt", "\n", "L", "\x15", *str(W / "sub" / "ln"), "\n")  # L: one question, where; relative
+assert os.readlink(W / "sub" / "ln") == "../a.txt" and (W / "sub" / "ln").read_text() == (W / "a.txt").read_text()
+more(app, "L", "\n")  # the default: the other pane's folder (here the same), the same name: taken
+assert "File exists" in log(app).split("\n")[-1]
+more(app, "H", "\x15", *"sub/hl", "\n")  # H: another name; relative to this folder
+assert (W / "sub" / "hl").stat().st_ino == (W / "a.txt").stat().st_ino and "another name for a.txt" in log(app)
+more(app, "\x1b", "/sub", "\n", "\n", "/ln", "\n", "L", "\x15", *"hl", "\n", "h", "\x1b")  # L on a link: retarget
+assert os.readlink(W / "sub" / "ln") == "hl"
+more(app, "\x1b", K.HOME, "L", "H", "A")  # on ..: nothing
+more(app, "/bin.dat", "\n", K.F2, K.END, "\n", "\x1b")  # F2, no [commands]: the file actions only; the last is z
+assert log(app).split("\n")[-1].endswith("bin.dat: 5.0K in 1 files")
 ui.connect = lambda *a, **k: None  # a host that's logged in but doesn't answer
 CFG.write_text('[hosts]\ng = ["nohost"]\n')
 more(app, "r", "@", "/nohost", "\n", "p", "\x1b", "\x1b", "/", ("err",), "x", "\n", "\x1b")
 assert "nohost: ssh: no network" in log(app)
+ui.connect = lambda *a, **k: (_ for _ in ()).throw(ConnectionError("nohost: Permission denied (publickey)."))
+more(app, "@", "/nohost", "\n", "p", "\x1b", "\x1b")  # p never asks for a login: it says one is wanted
+assert "nohost answers, but wants a login" in log(app)
 ui.connect = offline
+more(app, "@", "/nohost", "\n", "p", "\x1b", "\x1b")
+assert "nohost unreachable: ssh: no network" in log(app)
 os.chdir(BOX)
 (W / "sub" / "many").mkdir()
 for i in range(120):
     (W / "sub" / "many" / str(i)).touch()
 more(app, "\x1b", "\t", ("kick", 2), "\x06", "\n")  # ^C mid-find: what was found so far
 assert "find stopped" in log(app)
-more(app, "\x1b", "h", "/sub", "\n", ("kick", 1), "z")  # ^C mid-action: just that action
-assert "✗ interrupted" in log(app)
-more(app, "\x1b", "\x1b", K.F8, "^C", "/sub", "\n", "g", "^C")  # ^C at a question: no
+more(app, "\x1b", "/sub", "\n", ("kick", 1), "z")  # ^C mid-action: just that action
+assert "✗ stopped" in log(app)
+more(app, "\x0c")  # ^L: the whole screen drawn again
+assert "F10 quit" in SCR.text() and "1 local:" in SCR.text()
+more(app, "r", ("poll", 27))  # Esc while it runs: stopped there
+assert log(app).endswith("✗ stopped")
+more(app, K.END, "r", ("poll", ord("k")))  # anything else typed meanwhile: done after
+assert app.P.files.sel == len(app.P.files.rows) - 2
+more(app, "\x1b", "\x1b", "/sub", "\n", K.F8, "^C", "g", "^C")  # ^C at a question: no
 assert (W / "sub").exists()
 app.cleanup()
 
@@ -325,7 +367,7 @@ if SRV:
     (W / "rsub" / "f").write_text("f")
     (W / "bad.zip").write_bytes(b"junk")
     (W / "huge").touch()
-    os.truncate(W / "huge", ui.BIG + 1)
+    os.truncate(W / "huge", 3 * ui.HEAD)  # 3 MB of zeros: binary
     CFG.write_text(f'[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
     app = start("@", "/srv", "\n", "\n", "/a.txt", "\n", K.F3, "q")
     assert app.P.fs.name == "srv" and app.P.cwd == str(W)
@@ -333,12 +375,17 @@ if SRV:
     REAL.append("printf x >>")
     more(app, "r", "v", "e")  # your viewer gets a private copy; your editor's change goes back
     assert "✓ saved a.txt" in log(app) and (W / "a.txt").read_text().endswith("x")
-    more(app, "\x1b", "/huge", "\n", "v", "n", "\x1b", "/z.zip", "\n", "\n", "h", "\n")  # big: asked; an archive there
+    RAN.clear()  # binary, with a viewer set: never to it; rshm's hex view of the first MB; not edited
+    more(app, "\x1b", "/huge", "\n", "v")
+    assert "00000000  00 00" in SCR.final and "(the first 1.0M of 3.0M)" in SCR.final and not RAN
+    more(app, "e")
+    assert "huge is binary: v shows it" in log(app) and not RAN
+    more(app, "\x1b", "/z.zip", "\n", "\n", "h", "\n")  # an archive there
     assert app.P.up
     app.cleanup()
     assert not app.P.up and not left()
-    more(app, "r", "\x1b", "/bad.zip", "\n", "\n", "\x1b", "/a.txt", "\n", ("kick", 1), "v")  # not an archive; ^C fetching
-    assert "not an archive I can read (file could not be opened successfully)" in log(app) and "interrupted" in log(app) and not left()
+    more(app, "r", "\x1b", "/bad.zip", "\n", "\n", "\x1b", "/a.txt", "\n", ("kick", 2), "v")  # not an archive; ^C fetching
+    assert "not an archive I can read (file could not be opened successfully)" in log(app) and "stopped" in log(app) and not left()
     CFG.write_text(f'[tools]\nedit = "printf x >> {{file}}; rm -r {W / "rsub"}"\n[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
     REAL[:] = ["printf x >>"]
     more(app, "r", "\x1b", "/rsub", "\n", "\n", "/f", "\n", "e")  # an edit that can't go back: kept, and said where
@@ -354,10 +401,14 @@ if SRV:
     os.chdir(BOX)
     (W / "huge").unlink()
 
-# big files ask first; ^C in a prompt cancels it; a terminal with few colours gets mono
-(W / "big").write_bytes(b"\0" * (ui.BIG + 1))
-app = start("/big", "\n", "v", "n", K.F4, "n", "\x1b", "\x1b", "g", "\x03", "t", "t", "t", "t", "t")
-assert app.theme_name == "default"
+# a big text file: rshm's viewer shows its first MB, its editor won't take it; ^C in a prompt cancels it;
+(W / "big").write_bytes(b"line\n" * ui.HEAD)  # a terminal with few colours gets mono
+os.chdir(W)
+app = start("/big", "\n", "v")
+assert "(the first 1.0M of 5.0M)" in SCR.final and "line" in SCR.final
+more(app, K.F4, "\x1b", "\x1b", "g", "\x03", "t", "t", "t", "t", "t")
+assert "big is 5.0M: more than rshm's editor takes (1.0M)" in log(app) and app.theme_name == "default"
+os.chdir(BOX)
 FAKE.COLORS = 8
 app = start("t")
 assert app.C is ui.MONO and "mono" in log(app)
