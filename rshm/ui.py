@@ -1,13 +1,13 @@
 """The screen, mc's way: a menu bar, two panes (each a folder here or on a host, or the host list), the activity log,
 the F-key bar. Every action is one row of KEYS: keys, menu, F-key bar, F1 and --help all come from there."""
-import atexit, contextlib, curses, fnmatch, grp, os, posixpath, pwd, shlex, shutil, signal, socket, stat, subprocess, sys
-import tempfile, time, tomllib
+import atexit, contextlib, curses, fnmatch, grp, math, os, posixpath, pwd, shlex, shutil, signal, socket, stat
+import subprocess, sys, tempfile, time, tomllib
 from collections import deque
 
 from . import config, edit as editor, view as viewer
-from .fs import (ARCHIVES, PART, Archive, Local, Remote, copy, folder, isdir, islink, join, kind, look, marker, names, peek,
-                 rm, save, special, walk)
-from .screen import CLICK, MOVES, RIGHT, WHEEL_DOWN, WHEEL_UP, bar, cells, fit, human, line, readline, safe
+from .fs import (ARCHIVES, PART, Archive, Local, Remote, complete, copy, folder, isdir, islink, join, kind, look, marker,
+                 names, peek, rm, save, special, walk)
+from .screen import CLICK, MOVES, RIGHT, WHEEL_DOWN, WHEEL_UP, bar, cells, dur, fit, human, line, readline, safe
 from .ssh import argv, connect, quiet, unreachable
 
 ROLES = ("norm", "sel", "acc", "dim", "err", "bar", "dir", "exe", "link", "stale", "archive", "media", "special",
@@ -276,22 +276,24 @@ class App:
     def fsfor(s, h):  # one Remote per destination: both panes on one host share its session
         return s.local if h is LOCAL else s.remotes.setdefault(h["host"], Remote(h, s.tty, s.busy))
 
-    def ticker(s, label, total):  # progress in the activity panel; copies report how far each file is
-        t0 = last = time.monotonic()
-        pos, moved = {}, 0
+    def ticker(s, label, total):  # progress in the activity panel: how far, how fast, how long still
+        last, seen, rate, pos = time.monotonic(), 0, None, {}
 
         def tick(path, at, resumed=False):  # resumed: bytes found already there, not moved now
-            nonlocal moved, last
+            nonlocal last, seen, rate
             step, pos[path] = at - pos.get(path, 0), at
             tick.done += step
-            moved += 0 if resumed else step
-            if time.monotonic() - last > 0.25:
-                last, rate = time.monotonic(), moved / max(time.monotonic() - t0, 1e-3)
-                left = f" {tick.done * 100 // total}%  {int((total - tick.done) / rate) if rate else '?'}s left" if total else ""
+            tick.moved += 0 if resumed else step
+            now = time.monotonic()
+            if now - last > 0.25:  # speed: a moving average over ~5 s of time (chunks come unevenly), so the time
+                got, w = (tick.moved - seen) / (now - last), 1 - math.exp((last - now) / 5)  # left follows the link
+                rate, last, seen = got if rate is None else rate + w * (got - rate), now, tick.moved
+                pct = f" {tick.done * 100 // total}%" if total else ""
+                eta = f"  {dur((total - tick.done) / rate)} left" if total and rate else ""  # nothing moved: no guess
                 files = f"  {len(tick.finished)} files" if tick.finished else ""
-                s.busy(f"{label}  {human(tick.done)}{f' of {human(total)}' if total else ''}{left}  {human(rate)}/s{files}"
-                       "  Esc stops")
-        tick.done, tick.finished, tick.skipped = 0, set(), []
+                s.busy(f"{label}  {human(tick.done)}{f' of {human(total)}' if total else ''}{pct}{eta}  {human(rate)}/s"
+                       f"{files}  Esc stops")
+        tick.done, tick.moved, tick.finished, tick.skipped = 0, 0, set(), []
         return tick
 
     def xfer(s, fn, label, total, fss):  # fn(tick) over file systems fss; a dropped link reconnects and resumes
@@ -311,8 +313,9 @@ class App:
             s.msg = f"✗ {label}: link lost ({err})"
             s.busy(f"{label}: reconnecting in {min(2 ** fails, 20)}s, then resuming")
             time.sleep(min(2 ** fails, 20))
-        n = f", {len(tick.finished)} files" if len(tick.finished) > 1 else ""
-        s.msg = f"✓ {label}  {human(tick.done)}{n} in {time.monotonic() - t0:.0f}s"
+        n, took = f", {len(tick.finished)} files" if len(tick.finished) > 1 else "", time.monotonic() - t0
+        speed = f", {human(tick.moved / took)}/s" if took >= 1 else ""
+        s.msg = f"✓ {label}  {human(tick.done)}{n} in {dur(took)}{speed}"
 
     # --- moving around ---
     def ls(s, p, d, keep=None, record=True):  # list folder d in pane p; keep: a name for the cursor; record: history
@@ -459,7 +462,7 @@ class App:
 
     def goto(s):
         p = s.folder()
-        d = s.ask("go to:", p.cwd)
+        d = s.ask("go to:", p.cwd, p.fs, p.cwd)
         if d:
             s.ls(p, s.path(p, d))
 
@@ -709,7 +712,7 @@ class App:
         if move and isinstance(p.fs, Archive):
             raise OSError("an archive is read-only: copy out of it (F5) instead")
         what = items[0][0] if len(items) == 1 else f"{len(items)} entries"
-        dst = s.ask(f"{'move' if move else 'copy'} {what} to {o.fs.name}:", o.cwd)
+        dst = s.ask(f"{'move' if move else 'copy'} {what} to {o.fs.name}:", o.cwd, o.fs, o.cwd)
         if not dst:
             return
         dst = dst if dst.startswith("/") else join(o.cwd, dst)
@@ -745,7 +748,8 @@ class App:
                     p.fs.rename(join(p.cwd, n), t)
                     pairs.remove((n, a, t))
             if pairs:
-                total = None if any(isdir(a) for _, a, _ in pairs) else sum(a.get("size", 0) for _, a, _ in pairs if not islink(a))
+                total = s.measure(p.fs, p.cwd, [(n, a) for n, a, _ in pairs])[0]  # ponytail: one listing pass first, for
+                # a whole to measure progress and time left against; incremental counting if huge trees make it wait
                 gone = set()  # moved entries already removed at the source: a retry skips them
 
                 def run(tick):
@@ -768,7 +772,7 @@ class App:
 
     def mkdir(s):
         p = s.folder()
-        name = s.ask("new folder:").strip("/")
+        name = s.ask("new folder:", "", p.fs, p.cwd).strip("/")
         if name:
             p.fs.mkdir(join(p.cwd, name))
             s.ls(p, p.cwd, keep=name.split("/")[0])
@@ -792,7 +796,7 @@ class App:
         c = p.cur()
         if not c or not c[1]:
             return
-        new = s.ask("rename to:", c[0])
+        new = s.ask("rename to:", c[0], p.fs, p.cwd)
         if new and new != c[0]:
             dst = new if new.startswith("/") else join(p.cwd, new)
             dst = join(dst, c[0]) if new.endswith("/") else dst
@@ -805,7 +809,7 @@ class App:
         c = p.cur()
         if c and c[1] and islink(c[1]):
             path = join(p.cwd, c[0])
-            to = s.ask("points to:", c[1]["target"])
+            to = s.ask("points to:", c[1]["target"], p.fs, p.cwd)
             if to and to != c[1]["target"]:  # the new link beside the old, then over it: never neither
                 p.fs.symlink(to, path + PART)
                 p.fs.rename(path + PART, path)
@@ -824,7 +828,7 @@ class App:
             return
         o, name, src = s.O, posixpath.basename(c[0]), join(p.cwd, c[0])
         here = o.cwd if o.mode == "files" and o.fs is p.fs and not o.found else p.cwd  # one file system only
-        at = s.ask(f"{kind} to {name} at:", join(here, name))
+        at = s.ask(f"{kind} to {name} at:", join(here, name), p.fs, p.cwd)
         if not at:
             return
         at = s.path(p, at)
@@ -880,17 +884,19 @@ class App:
     def size(s):  # z: the size of the marked entries, or of the one under the cursor (a folder: all inside it)
         p = s.folder()
         items = p.targets()
-        total = files = 0
-        for n, a in items:
-            total, files = total + a.get("size", 0) * (not isdir(a)), files + (not isdir(a))
-            if isdir(a):
-                for i, (_, b) in enumerate(walk(p.fs, join(p.cwd, n))):
-                    if not isdir(b):
-                        total, files = total + b.get("size", 0), files + 1
-                    if i % 200 == 0:
-                        s.busy(f"size {n}: {human(total)}  Esc stops")
+        total, files = s.measure(p.fs, p.cwd, items)
         if items:
             s.msg = f"{items[0][0] if len(items) == 1 else f'{len(items)} entries'}: {human(total)} in {files} files"
+
+    def measure(s, fs, d, items):  # (bytes, files) of the files in items (in folder d), trees counted all through:
+        total = files = 0               # what a copy of them moves; Esc stops the count
+        for n, a in items:
+            for i, (_, b) in enumerate(walk(fs, join(d, n)) if isdir(a) else [(n, a)]):
+                if stat.S_ISREG(b.get("perm", 0)):
+                    total, files = total + b.get("size", 0), files + 1
+                if i % 200 == 0:
+                    s.busy(f"counting {n}: {human(total)}, {files} files  Esc stops")
+        return total, files
 
     # --- commands ---
     def menu(s, y=None, x=None):  # F2, or a right-click: what can be done with what's under the cursor, your
@@ -992,9 +998,10 @@ class App:
         sys.exit()
 
     # --- prompts ---
-    def ask(s, q, text=""):  # the one-line input at the bottom, over the current screen
-        with s.still():
-            return (readline(s.scr, q, text, s.C["acc"] | curses.A_BOLD, s.paint) or "").strip()
+    def ask(s, q, text="", fs=None, base=""):  # the one-line input at the bottom, over the current screen; a path's:
+        with s.still():                             # fs, base: Tab completes it there
+            return (readline(s.scr, q, text, s.C["acc"] | curses.A_BOLD, s.paint,
+                             fs and (lambda t: complete(fs, base, t))) or "").strip()
 
     def confirm(s, q):  # one key: y says yes, anything else no
         s.typing = q

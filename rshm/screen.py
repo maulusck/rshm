@@ -1,5 +1,5 @@
 """What every screen of rshm shares: text measured in terminal cells, fitted to a width, the one-line input."""
-import contextlib, curses, unicodedata
+import contextlib, curses, os, unicodedata
 
 MOVES = {curses.KEY_UP: -1, ord("k"): -1, curses.KEY_DOWN: 1, ord("j"): 1, curses.KEY_PPAGE: -10, curses.KEY_NPAGE: 10,
          curses.KEY_HOME: -1 << 30, curses.KEY_END: 1 << 30}
@@ -64,8 +64,13 @@ def human(n):  # 1536 -> 1.5K
         return ""
     for u in "BKMGT":
         if n < 1024 or u == "T":
-            return f"{n}B" if u == "B" else f"{n:.1f}{u}"
+            return f"{n:.0f}B" if u == "B" else f"{n:.1f}{u}"
         n /= 1024
+
+
+def dur(s):  # 4213 -> 1h10m, 185 -> 3m05s, 42 -> 42s
+    s = int(s)
+    return f"{s}s" if s < 60 else f"{s // 60}m{s % 60:02d}s" if s < 3600 else f"{s // 3600}h{s % 3600 // 60:02d}m"
 
 
 def bar(left, right, W, keep="end"):  # a status line W-1 cells wide: right kept (its start, on a narrow screen),
@@ -73,10 +78,10 @@ def bar(left, right, W, keep="end"):  # a status line W-1 cells wide: right kept
     return fit(left, max(W - 1 - cells(right), 0), keep) + right
 
 
-def line(scr, q, text="", attr=0, back=None, ends=()):  # the one-line editor on the bottom row -> (text, the key that
-    i = len(text)                                      # ended it: ⏎, Esc (^C too), or one of ends); back() repaints
-    curses.curs_set(1)                                 # what's behind it. ← → Home End Del ^A ^E ^K ^U ^W edit
-    try:
+def line(scr, q, text="", attr=0, back=None, ends=(), complete=None):  # the one-line editor on the bottom row
+    i, fresh, cyc, k = len(text), bool(text), None, 0  # -> (text, the key that ended it: ⏎, Esc (^C too), or one of
+    curses.curs_set(1)  # ends); back() repaints behind it. ← → Home End Del ^A ^E ^K ^U ^W edit. A prefilled answer
+    try:                # is selected (typing replaces it, ⌫ clears it); Tab: complete(typed) -> what it can become
         while True:
             back and back()
             H, W = scr.getmaxyx()
@@ -84,13 +89,33 @@ def line(scr, q, text="", attr=0, back=None, ends=()):  # the one-line editor on
             start = max(0, col - W + 2)  # sideways, to keep the cursor in sight
             with contextlib.suppress(curses.error):  # a terminal too small for it: what fits shows
                 scr.addstr(H - 1, 0, span(safe(f" {q} {text}"), start, max(W - 1, 0)), attr)
+                if fresh and not start:
+                    scr.addstr(H - 1, cells(f" {q} "), span(safe(text), 0, min(cells(text), W - 2 - cells(f" {q} "))),
+                               attr | curses.A_REVERSE)
+                if cyc and col + 8 < W:  # going round the matches: which one of how many
+                    scr.addstr(H - 1, W - 2 - len(f"{k + 1}/{len(cyc)}"), f"{k + 1}/{len(cyc)}", attr | curses.A_REVERSE)
                 scr.move(H - 1, max(0, min(col - start, W - 2)))
             c = scr.get_wch()
             if c in ("\n", "\r", curses.KEY_ENTER) or c in ends:
                 return text, "\n" if c in ("\r", curses.KEY_ENTER) else c
             if c in ("\x1b", "\x03"):
                 return text, "\x1b"
-            if c in (curses.KEY_BACKSPACE, "\x7f", "\b") and i:
+            was, fresh = fresh, False
+            if c == "\t" and complete:  # as far as all matches agree; again (or no further): each match in turn
+                if cyc:
+                    k = (k + 1) % len(cyc)
+                    head = cyc[k]
+                else:
+                    found = complete(text[:i])
+                    head = os.path.commonprefix(found) if found else text[:i]
+                    if len(found) > 1 and head == text[:i]:
+                        cyc, k, head = found, 0, found[0]
+                text, i = head + text[i:], len(head)
+                continue
+            cyc = None
+            if c in (curses.KEY_BACKSPACE, "\x7f", "\b", curses.KEY_DC) and was:
+                text, i = "", 0
+            elif c in (curses.KEY_BACKSPACE, "\x7f", "\b") and i:
                 text, i = text[:i - 1] + text[i:], i - 1
             elif c == curses.KEY_DC:
                 text = text[:i] + text[i + 1:]
@@ -106,13 +131,13 @@ def line(scr, q, text="", attr=0, back=None, ends=()):  # the one-line editor on
                 j = text[:i].rstrip(" ").rfind(" ") + 1
                 text, i = text[:j] + text[i:], j
             elif isinstance(c, str) and c.isprintable():
-                text, i = text[:i] + c + text[i:], i + 1
+                text, i = (c, 1) if was else (text[:i] + c + text[i:], i + 1)
     except KeyboardInterrupt:
         return text, "\x1b"
     finally:
         curses.curs_set(0)
 
 
-def readline(scr, q, text="", attr=0, back=None):  # ⏎ takes the line as typed, Esc or ^C cancels (None)
-    text, k = line(scr, q, text, attr, back)
+def readline(scr, q, text="", attr=0, back=None, complete=None):  # ⏎ takes the line as typed, Esc or ^C: None
+    text, k = line(scr, q, text, attr, back, complete=complete)
     return text if k == "\n" else None

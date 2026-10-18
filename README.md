@@ -51,8 +51,9 @@ one above the other when the terminal stands upright (a phone, Termux), one at a
 | `F2` · `^O` `s` · `p` | menu of what's under the cursor, your `[commands]` last · shell here (on the host list: on that host) · live check (never asks for a login) |
 | `Tab` · `@` · `Esc` · `r` · `t` · `[` `]` · `^L` · `F10` `q` | other pane · host list · back: filter, marks, find results, host list; stops what's running · reload · theme · log · draw the screen again · quit |
 
-Every question line edits like a shell's: `←` `→` `Home` `End` `Del`, `^A` `^E` `^K` `^U` `^W`; in a form, `↑` `↓` `Tab`
-move between rows. Mouse and touch: tap selects, a second tap opens (a host too); right-click opens the
+Every question line edits like a shell's: `←` `→` `Home` `End` `Del`, `^A` `^E` `^K` `^U` `^W`. An answer it offers
+is selected: type to replace it, `⌫` clears it, `⏎` takes it. Where it asks for a path, `Tab` completes it, here or on
+a host (as far as the names agree, then each in turn); in a form, `↑` `↓` `Tab` move between rows. Mouse and touch: tap selects, a second tap opens (a host too); right-click opens the
 menu of what's under it (`F2`); the wheel scrolls panes, the log, menus, viewer and editor. The viewer has less's keys (`space` `b` `g` `G`
 `/` `?` `n` `N`, `N g` for line N, `w` wrap, `x` hex), the editor nano's (`^S` save, `^X` exit, `^W` find,
 `^\` replace, `^K` `^U` cut and paste lines, `^_` line, `^Z` undo).
@@ -92,6 +93,7 @@ view = ""                                 # "less -R", "bat --paging=always"
 |---|---|
 | Copy, move | between any two panes: here ↔ host, host ↔ host (through this machine), within one host (by the server itself on OpenSSH 9.0+), out of archives; like `cp -pP`: mode and times travel, links stay links; a folder into a folder merges, asking first if anything gets replaced; a move within one file system is a rename |
 | Transfers | byte for byte; each file travels as `NAME.rshm-part`, renamed into place when complete, so a target is always whole: the old file or the new; a replaced file keeps its mode; the source is opened before anything is made at the other end (one you can't read leaves nothing there); a dropped link reconnects and resumes (a part is resumed only if its last bytes are the source's) |
+| Progress | how far (of how much: a folder is counted first), how fast (the last few seconds' speed, so it follows the link), how long still; at the end, how much in how long, at what speed |
 | Stopping | `Esc` stops whatever runs (a copy, a fetch, a load, a find) at its next step, `Ctrl-C` at once; a stopped copy leaves no part behind, files already copied stay |
 | Attributes | `A`: mode, owner, time of the marked entries (or the one under the cursor); only what you change is applied; names or numbers, on a host as its own listing shows them |
 | View, edit | your `[open]` pattern if one matches; text to your tools (`[tools]`, else `$VISUAL` `$EDITOR` `$PAGER`), on a private local copy of a host's file (of what a link points to), saved back only if changed; a binary file never goes to an editor or a text tool: rshm's viewer shows it in hex. rshm's own viewer shows a file's first MB (any size, at once), its editor takes text up to a MB and saves straight back |

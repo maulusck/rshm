@@ -359,6 +359,12 @@ if srv:
         assert "can't make hard links" in str(e)
     s.ext = ext
     assert not hasattr(R, "nope")  # only the primitives are the session's
+    (D / "tdir").symlink_to(D / "t")  # Tab: what a typed path can go on to, on this machine or a host alike
+    for f in (Lo, R):
+        assert fs.complete(f, str(D), "t") == ["t/", "tdir/"] and fs.complete(f, str(D), "t/su") == ["t/sub/"]
+        assert fs.complete(f, "/", str(D / "t") + "/sub/") == [str(D / "t" / "sub" / "x.txt")]
+        assert fs.complete(f, str(D), "nope/x") == [] and fs.complete(f, str(D), "t/sub/x.txt/") == []
+    assert fs.complete(Lo, "/", "~/") == fs.complete(Lo, "/", str(Path.home()) + "/") and fs.complete(R, "/", "~/x") == []
     chunks = s.read(str(D / "t" / "big.bin"), 0, len(big))  # a read stopped early leaves no replies behind
     next(chunks)
     chunks.close()
@@ -414,6 +420,7 @@ with zipfile.ZipFile(d / "ln.zip", "w") as zf:
 ar = fs.Archive(str(d / "ln.zip"), "x")
 assert ar.readlink("/ln") == "t.txt" and ar.stat("/ln")["size"] == 6 and dict(fs.look(ar, "/"))["ln"]["target"] == "t.txt"
 assert fs.peek(ar, "/nope") is None and fs.peek(ar, "/t.txt")["size"] == 6 and ar.alive()
+assert fs.complete(ar, "/", "") == ["ln", "t.txt"] and fs.complete(ar, "/", "/t") == ["/t.txt"]  # inside an archive too
 for bad in (lambda: ar.stat("/nope"), lambda: ar.readlink("/t.txt")):
     try:
         bad()
@@ -642,8 +649,52 @@ tk("a", 1024, resumed=True)
 tk("a", 2048)
 tk.finished.add("a")
 tk("b", 1024)
-ui.time = time
 assert said[-1].startswith("↑ x  3.0K of 4.0K 75%") and "1 files" in said[-1] and "Esc stops" in said[-1], said
+assert [screen.dur(x) for x in (0, 42, 185, 4213)] == ["0s", "42s", "3m05s", "1h10m"]
+
+now = [0.0]  # the time left follows the link's speed (a moving average over time), not the average since the start
+ui.time = types.SimpleNamespace(monotonic=lambda: now[0], strftime=time.strftime, localtime=time.localtime)
+said.clear()
+tk = ui.App.ticker(types.SimpleNamespace(busy=said.append), "→ big", 1_000_000)
+left = lambda: int(re.search(r"(\d+)s left", said[-1])[1]) + 60 * int((re.search(r"(\d+)m\d+s left", said[-1]) or [0, 0])[1])
+for k in range(1, 41):  # 1 KB/s for 40 s
+    now[0] = k
+    tk("f", 1000 * k)
+slow = left()
+assert "96%" not in said[-1] and abs(slow - 960) < 5 and "1000B/s" in said[-1], said[-1]  # 960 KB to go at 1 KB/s
+for k in range(41, 61):  # then 10 KB/s: within 20 s the estimate has caught up (an all-time average would say ~3 min)
+    now[0] = k
+    tk("f", 40_000 + 10_000 * (k - 40))
+assert left() < 100 and re.search(r"  (8|9|10)\.\dK/s", said[-1]), said[-1]
+said.clear()
+tk = ui.App.ticker(types.SimpleNamespace(busy=said.append), "→ x", 100)
+now[0] += 1
+tk("f", 50, resumed=True)  # nothing moved yet, only found there: no guess at the time left
+assert "50%" in said[-1] and "left" not in said[-1], said[-1]
+
+app = types.SimpleNamespace(busy=lambda w: None, msg="")  # the end: what, how much, how long, how fast
+app.ticker = lambda label, total: ui.App.ticker(app, label, total)
+now[0] = 0
+
+
+def slow_copy(tick):
+    for k in range(1, 186):
+        now[0] = k
+        tick("f", 8000 * k)
+
+
+ui.App.xfer(app, slow_copy, "→ tree", 8000 * 185, [])
+ui.time = time
+assert app.msg == "✓ → tree  1.4M in 3m05s, 7.8K/s", app.msg
+
+(d / "m" / "in").mkdir(parents=True)  # what a copy moves: the files' bytes; not links, pipes, folders
+(d / "m" / "in" / "a").write_bytes(b"x" * 1000)
+(d / "m" / "b").write_bytes(b"y" * 24)
+(d / "m" / "ln").symlink_to("b")
+os.mkfifo(d / "m" / "p")
+counter = types.SimpleNamespace(busy=lambda w: None)
+assert ui.App.measure(counter, fs.Local(), str(d), [("m", fs.Local().stat(str(d / "m")))]) == (1024, 2)
+assert ui.App.measure(counter, fs.Local(), str(d / "m"), [("b", fs.Local().stat(str(d / "m" / "b"))), ("ln", fs.Local().stat(str(d / "m" / "ln"), False))]) == (24, 1)
 
 shutil.rmtree(d)
 print("ok")

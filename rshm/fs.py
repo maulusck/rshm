@@ -310,6 +310,27 @@ def look(fs, d):  # a folder's entries, each link with its target and what it po
     return out
 
 
+def complete(fs, base, t):  # what path t (typed from folder base) can go on to: names there that start like it,
+    head, slash, stem = t.rpartition("/")  # a folder (or a link to one) ending in /, dotfiles only for a dot
+    if not slash:
+        d = base
+    elif t[:1] in "/~":  # from the top, or from home
+        d = head or "/"
+    else:
+        d = join(base, head)
+    try:
+        d = fs.realpath(d)
+        out = []
+        for n, a in fs.listdir(d):
+            if n.startswith(stem) and (n[:1] != "." or stem[:1] == "."):
+                with contextlib.suppress(OSError):
+                    a = fs.stat(join(d, n)) if islink(a) else a  # a link to a folder completes as one
+                out.append(t[:len(t) - len(stem)] + n + "/" * isdir(a))
+        return sorted(out)
+    except OSError:  # not a folder, not readable, the link gone: nothing to offer, the typing goes on
+        return []
+
+
 def walk(fs, d, rel=""):  # every entry under d, as (path relative to d, attrs, as look() gives them); links not followed,
     try:                     # folders below it may not read skipped (d itself unreadable is an error)
         entries = look(fs, join(d, rel) if rel else d)

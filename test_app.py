@@ -228,6 +228,29 @@ for H, Wd in ((5, 60), (2, 9)):
     SCR.keys.extend(["\x17", *[K.LEFT] * 4, "\x0b", "X", "\x01", "\x05", "\n"])
     assert screen.readline(SCR, "q:", "one two three") == "one X"
 
+# --- a prefilled answer is selected: typing replaces it, ⌫ clears it, a move keeps it ---
+for keys, want in ((["x", "\n"], "x"), (["\x7f", "\n"], ""), ([K.END, "x", "\n"], "prefillx"),
+                   ([K.LEFT, "\x7f", "\n"], "prefil"), (["\n"], "prefill")):
+    SCR = VT(5, 40)
+    SCR.keys.extend(keys)
+    assert screen.readline(SCR, "q:", "prefill") == want, (keys, want)
+
+# --- Tab completes a path: as far as the matches agree, then each in turn (which of how many shown) ---
+tab = lambda t: fs.complete(fs.Local(), str(W), t)
+for keys, want in ((["\x15", *"su", "\t", "\n"], "sub/"), (["\x15", *"b", "\t", "\t", "\n"], "bin.dat"),
+                   (["\x15", "\t", "\t", "\n"], sorted(x for x in os.listdir(W) if x[0] != ".")[1]),
+                   (["\x15", *"zz", "\t", "\n"], "zz"), (["\x15", *"a.", "\t", "x", "\n"], "a.txtx")):
+    SCR = VT(5, 60)
+    SCR.keys.extend(keys)
+    got = screen.readline(SCR, "go to:", str(W), complete=tab)
+    assert got.rstrip("/") == want.rstrip("/") or got == want, (keys, got, want)
+SCR = VT(5, 60)
+SCR.keys.extend(["\x15", "\t", "\t"])
+try:
+    screen.readline(SCR, "go to:", "", complete=tab)
+except Done:
+    assert f"2/{len([x for x in os.listdir(W) if x[0] != '.'])}" in SCR.final, SCR.final
+
 # --- the viewer: every key, text and hex, at any size ---
 for H, Wd in ((30, 120), (4, 10), (1, 1)):
     SCR = VT(H, Wd)
@@ -247,6 +270,11 @@ more(app, "@", K.DOWN, (2, 5, CLICK))  # a tap on a host only selects it (a logi
 assert app.P.mode == "hosts" and app.P.cur()[2] is ui.LOCAL
 more(app, (2, 5, CLICK))  # the second opens it
 assert app.P.mode == "files"
+more(app, "g", "\x15", *"su", "\t", "\n")  # go to: Tab completes in the pane's own folder
+assert app.P.cwd == str(W / "sub")
+more(app, "h")
+more(app, "/", *"zz", "\x1b")  # Esc in the filter: no filter
+assert app.P.files.flt == "" and len(app.P.files.rows) > 1
 more(app, "@", K.F5)  # on the host list, a file action asks for a host
 assert "pick a host first" in log(app)
 more(app, "\x1b", "f")  # history: nothing further
