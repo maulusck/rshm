@@ -7,7 +7,8 @@ from collections import deque
 from . import config, edit as editor, view as viewer
 from .fs import (ARCHIVES, PART, Archive, Local, Remote, complete, copy, folder, isdir, islink, join, kind, look, marker,
                  names, peek, rm, save, special, walk)
-from .screen import CLICK, MOVES, RIGHT, WHEEL_DOWN, WHEEL_UP, bar, cells, dur, fit, human, line, readline, safe
+from .screen import (CLICK, MOVES, RIGHT, WHEEL_DOWN, WHEEL_UP, bar, cells, cursor, dur, fit, human, line, plain,
+                     readline, safe, window)
 from .ssh import argv, connect, quiet, unreachable
 
 ROLES = ("norm", "sel", "acc", "dim", "err", "bar", "dir", "exe", "link", "stale", "archive", "media", "special",
@@ -24,17 +25,32 @@ THEMES = {  # (fg, bg[, b(old) d(im)]) per role; -1 = the terminal's own
                  (24, 195), (28, 195, "b")],  # Aero: sky, aqua, glass
     "teletext": [(231, 16), (16, 226), (51, 16, "b"), (27, 16), (196, 16, "b"), (226, 21), (226, 16, "b"), (46, 16, "b"),
                  (51, 16), (196, 16), (201, 16), (46, 16), (201, 16, "b"), (27, 16), (231, 16), (46, 16, "b")],  # Ceefax
+    "avionics": [(252, 16), (16, 201), (51, 16, "b"), (244, 16), (196, 16, "b"), (51, 236), (87, 16, "b"), (46, 16, "b"),
+                 (80, 16), (160, 16), (214, 16), (171, 16), (220, 16, "b"), (240, 16), (252, 16), (46, 16, "b")],  # cockpit
+    "robot": [(252, 236), (16, 220), (208, 236, "b"), (243, 236), (196, 236, "b"), (16, 208), (214, 236, "b"),
+              (118, 236, "b"), (110, 236), (160, 236), (180, 236), (175, 236), (226, 236, "b"), (241, 236), (252, 236),
+              (118, 236, "b")],  # machine shop: graphite, safety orange, warning yellow
+    "cyberwave": [(189, 53), (16, 51), (213, 53, "b"), (97, 53), (203, 53, "b"), (16, 213), (51, 53, "b"), (121, 53, "b"),
+                  (87, 53), (203, 53), (215, 53), (219, 53), (226, 53, "b"), (133, 53), (189, 53), (121, 53, "b")],  # neon
+    "steel": [(146, 235), (235, 110), (110, 235, "b"), (60, 235), (167, 235, "b"), (252, 60), (153, 235, "b"),
+              (151, 235, "b"), (109, 235), (167, 235), (144, 235), (182, 235), (187, 235, "b"), (60, 235), (146, 235),
+              (108, 235, "b")],  # blue-grey, calm
+    "paper": [(236, 230), (236, 223), (88, 230, "b"), (137, 230), (124, 230, "b"), (230, 94), (24, 230, "b"),
+              (22, 230, "b"), (30, 230), (124, 230), (94, 230), (90, 230), (130, 230, "b"), (144, 230), (236, 230),
+              (22, 230, "b")],  # a book: cream page, ink, red rubrics, a highlighter, a leather spine
+    "ember": [(166, 16), (16, 166), (202, 16, "b"), (88, 16), (196, 16, "b"), (16, 130), (202, 16, "b"), (208, 16, "b"),
+              (173, 16), (124, 16), (136, 16), (168, 16), (220, 16, "b"), (88, 16), (166, 16), (178, 16, "b")],  # night
 }
 MONO = dict(zip(ROLES, (0, curses.A_REVERSE, curses.A_BOLD, curses.A_DIM, curses.A_BOLD | curses.A_STANDOUT,
                         curses.A_REVERSE, curses.A_BOLD, curses.A_BOLD, 0, curses.A_DIM, 0, 0, curses.A_BOLD,
                         curses.A_DIM, 0, curses.A_BOLD)))
 STYLE = {"b": curses.A_BOLD, "d": curses.A_DIM}
-NAMES = {"⏎": (10, 13, curses.KEY_ENTER), "→": (curses.KEY_RIGHT,), "←": (curses.KEY_LEFT,), "Space": (32,),
-         "⌫": (curses.KEY_BACKSPACE, 127, 8), "Del": (curses.KEY_DC,), "Ins": (curses.KEY_IC,), "Tab": (9,),
+NAMES = {"Enter": (10, 13, curses.KEY_ENTER), "→": (curses.KEY_RIGHT,), "←": (curses.KEY_LEFT,), "Space": (32,),
+         "Bksp": (curses.KEY_BACKSPACE, 127, 8), "Del": (curses.KEY_DC,), "Ins": (curses.KEY_IC,), "Tab": (9,),
          "Esc": (27,), **{f"^{c}": (ord(c) - 64,) for c in "FLORU"}, **{f"F{i}": (curses.KEY_F0 + i,) for i in range(1, 11)}}
 MENUS = ("Pane 1", "File", "Mark", "Command", "Options", "Pane 2")
 KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under both pane menus; no menu: help only
-    ("File", "⏎ → l", "open", "open"), ("File", "← h ⌫", "parent folder", "parent"),
+    ("File", "Enter → l", "open", "open"), ("File", "← h Bksp", "parent folder", "parent"),
     ("File", "i", "info: everything about it", "info"), ("File", "F3 v", "view", "view"), ("File", "F4 e", "edit", "edit"),
     ("File", "F5 c", "copy to the other pane", "copy"), ("File", "F6 m", "move to the other pane", "move"),
     ("File", "F7 n", "mkdir: new folder", "mkdir"), ("File", "F8 x Del", "delete", "delete"),
@@ -53,7 +69,7 @@ KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under bo
     ("Pane", "Esc", "back: filter, marks, find, host list", "esc"),
     ("Command", "F2", "menu: what can be done here", "menu"), ("Command", "^O s", "shell here", "shell"),
     ("Command", "p", "live check of the host", "ping"),
-    ("Options", "F9", "bar: the menus up top", "menubar"), ("Options", "t", "theme", "theme"),
+    ("Options", "F9", "bar: the menus up top", "menubar"), ("Options", "t", "theme: pick one", "theme"),
     ("Options", "[ ]", "log: older / newer", "logscroll"), ("Options", "", "edit config", "editcfg"),
     ("Options", "^L", "draw the screen again", "draw"), ("Options", "F1 ?", "help: all keys", "help"),
     ("Options", "F10 q", "quit", "quit"),
@@ -70,8 +86,8 @@ SHELL = 'exec "${SHELL:-sh}" -l'
 MIN_W, MIN_H, PANE_W, PANE_H = 20, 7, 24, 4  # the whole screen, and one pane (title row included), at the least
 
 
-def keys_help():  # `rshm --help` shows the same table the app runs on
-    return "\n".join(f"  {k:<26} {w}" for _, k, w, _ in KEYS)
+def keys_help():  # `rshm --help` shows the same table the app runs on, as the terminal shows it
+    return plain("\n".join(f"  {k:<26} {w}" for _, k, w, _ in KEYS))
 
 
 def codes(keys):  # "x Del" -> every keycode it stands for
@@ -145,20 +161,25 @@ class Pane:  # a folder on some file system, or the host list to pick one
 
 
 class App:
-    def __init__(s, scr, cfg):
-        s.cfg, s.scr, s.msg, s.typing = cfg, scr, "", None
+    def __init__(s, scr, cfg, note=""):  # note: what the start had to say (a TERM drawn as another)
+        s.cfg, s.scr, s.msg, s.typing = cfg, window(scr), "", None
         s.panes, s.focus, s.rects, s.single, s.spans, s.opened = [Pane(), Pane()], 0, [], False, {}, None  # opened: menu
-        s.local, s.remotes, s.hosts, s.c, s.cmds, s.theme_name = Local(), {}, {}, {}, {}, "default"
+        s.local, s.remotes, s.hosts, s.c, s.cmds, s.theme_name, s.shown = Local(), {}, {}, {}, {}, "default", ""
         s.dots, s.order, s.rev = True, "name", False
         s.log, s.logoff, s.working, s.spun, s.drawing = deque(maxlen=500), 0, None, 0, False
-        curses.curs_set(0)
+        if note:
+            s.note(note)
+        cursor(0)
         curses.set_escdelay(25)
         curses.mouseinterval(0)
         curses.mousemask(curses.ALL_MOUSE_EVENTS)
-        if curses.has_colors():
-            curses.start_color()
+        s.colours = curses.has_colors() and not os.environ.get("NO_COLOR")  # no-color.org: set, not empty: none
+        s.defaults = False  # the terminal's own colours (-1), asked for always, or ncurses paints white on black
+        if curses.has_colors():  # ponytail: curses.wrapper starts colours even under NO_COLOR, so a terminal without its
+            curses.start_color()  # own (-1) shows white on black there; our own wrapper if one ever turns up
             with contextlib.suppress(curses.error):
-                curses.use_default_colors()  # without -1 support, set_theme falls back to mono
+                curses.use_default_colors()
+                s.defaults = True
         s.keymap = {c: getattr(s, m) for _, keys, _, m in KEYS if m for c in codes(keys)}
         signal.signal(signal.SIGALRM, s.spin)
         atexit.register(s.cleanup)
@@ -178,7 +199,7 @@ class App:
 
     def folder(s):  # the focused pane, when it shows a folder: what file actions need
         if s.P.mode != "files":
-            raise OSError("pick a host first: ⏎ on it")
+            raise OSError("pick a host first: Enter on it")
         return s.P
 
     def load(s):
@@ -199,15 +220,27 @@ class App:
         for p in s.panes:
             s.sync(p)
 
-    def set_theme(s, name):  # a theme needing more colours than the terminal has falls back to mono, not garble
-        s.theme_name = name if name in THEMES else "default"
-        t = THEMES[s.theme_name]
+    def can(s, name):  # can this terminal show the theme: as many colours, and its own (-1) where the theme uses them?
+        t = THEMES[name]
+        fits = max(max(x[:2]) for x in t) < curses.COLORS
+        return s.colours and fits and (s.defaults or min(min(x[:2]) for x in t) >= 0)
+
+    def lack(s):  # why a theme can't show
+        return "NO_COLOR is set" if curses.has_colors() and not s.colours else \
+            f"this terminal shows {curses.COLORS if s.colours else 'no'} colours"
+
+    def set_theme(s, name):  # the theme as named (and saved); shown if this terminal can, else the default theme, else
+        s.theme_name = name if name in THEMES else "default"  # none: bold, reverse and dim. Never a theme half shown
+        shown = next((n for n in (s.theme_name, "default") if s.can(n)), None)
         s.C = MONO
-        if curses.has_colors() and max(max(x[:2]) for x in t) < curses.COLORS:
-            with contextlib.suppress(curses.error):
-                for i, x in enumerate(t, 1):
-                    curses.init_pair(i, x[0], x[1])
-                s.C = {r: curses.color_pair(i) | STYLE.get(x[2:3] and x[2], 0) for i, (r, x) in enumerate(zip(ROLES, t), 1)}
+        if shown:
+            t = THEMES[shown]
+            for i, x in enumerate(t, 1):
+                curses.init_pair(i, x[0], x[1])
+            s.C = {r: curses.color_pair(i) | STYLE.get(x[2:3] and x[2], 0) for i, (r, x) in enumerate(zip(ROLES, t), 1)}
+        if shown not in (s.theme_name, s.shown):  # a theme not shown as named: said once
+            s.note(f"theme {s.theme_name}: {s.lack()}; {shown or 'bold and reverse'} instead")
+        s.shown = shown
         s.scr.bkgd(" ", s.C["norm"])
 
     def sync(s, p):  # each view its own filter. ponytail: a hosts filter unfolds every group; per-match if big trees get noisy
@@ -504,7 +537,7 @@ class App:
         p = s.P
         v = p.v
         s.typing, v.flt = "/", ""
-        curses.curs_set(1)
+        cursor(1)
         try:
             while True:
                 s.paint()
@@ -531,7 +564,7 @@ class App:
                     break
         finally:
             s.typing = None
-            curses.curs_set(0)
+            cursor(0)
 
     def sort(s):
         i = s.choose([(o, "✓" if o == s.order else "") for o in ORDER] + [("reverse", "✓" if s.rev else "")],
@@ -708,7 +741,7 @@ class App:
         if not items:
             return
         if o.mode != "files":
-            raise OSError("the other pane shows no folder: pick one there (Tab, then ⏎ on a host)")
+            raise OSError("the other pane shows no folder: pick one there (Tab, then Enter on a host)")
         if move and isinstance(p.fs, Archive):
             raise OSError("an archive is read-only: copy out of it (F5) instead")
         what = items[0][0] if len(items) == 1 else f"{len(items)} entries"
@@ -916,7 +949,7 @@ class App:
         cmd = s.cmds[cmds[i - len(acts)]]
         for k, v in sub.items():
             cmd = cmd.replace(k, v)
-        s.run(p.fs, f"{cmd}; printf '\\n[exit %s] ⏎ ' $?; read _", p.cwd)
+        s.run(p.fs, f"{cmd}; printf '\\n[exit %s] Enter: back ' $?; read _", p.cwd)
 
     def run(s, fs, script, d):  # a shell command on that machine, on the terminal; then show what changed
         cmd, cwd = fs.run(script, d)
@@ -940,7 +973,7 @@ class App:
             connect(h, s.tty, s.busy, timeout=3, ask=False)
         except ConnectionError as e:
             raise OSError(f"{h['host']} unreachable: {e}" if unreachable(str(e)) else
-                          f"{h['host']} answers, but wants a login: ⏎ on it logs in") from None
+                          f"{h['host']} answers, but wants a login: Enter on it logs in") from None
         s.busy(f"live check {h['host']}")
         t0 = time.monotonic()
         rc, err = quiet([*argv(h, batch=True, timeout=3), h["host"], "true"])
@@ -949,12 +982,16 @@ class App:
         s.msg = f"✓ {h['host']} answers ({(time.monotonic() - t0) * 1000:.0f} ms)"
 
     # --- options ---
-    def theme(s):
-        names = list(THEMES)
-        s.set_theme(names[(names.index(s.theme_name) + 1) % len(names)])
-        if s.cfg.exists():  # no config: for this session only, nothing written
-            config.save(s.cfg, config.retheme(s.cfg.read_text(), s.theme_name))
-        s.msg = f"theme: {s.theme_name}" + (" (mono: the terminal lacks its colours)" if s.C is MONO else "")
+    def theme(s):  # t: the themes this terminal can show; the pick is saved (no config: this session only)
+        names = [n for n in THEMES if s.can(n)]
+        if not names:
+            raise OSError(f"no theme to pick: {s.lack()}")
+        i = s.choose([(n, "✓" if n == s.shown else "") for n in names], title="theme")
+        if isinstance(i, int):
+            s.set_theme(names[i])
+            if s.cfg.exists():
+                config.save(s.cfg, config.retheme(s.cfg.read_text(), s.theme_name))
+            s.msg = f"theme: {s.theme_name}"
 
     def editcfg(s):  # the config (from the sample, the first time) in your editor or rshm's own
         config.create(s.cfg)
@@ -1026,7 +1063,7 @@ class App:
         w = min(max(max(cells(l) + cells(k) for l, k in items) + 6, cells(title) + 6), W)
         h = min(len(items) + 2, H)
         y, x = max(0, min(y0, H - h)), max(0, min(x0, W - w))
-        win = curses.newwin(h, w, y, x)
+        win = window(curses.newwin(h, w, y, x))
         win.keypad(True)
         win.bkgd(" ", s.C["norm"])
         off = max(0, i - h + 3)  # scroll when the terminal is shorter than the menu
@@ -1229,6 +1266,9 @@ class App:
             spans.append((x, x + slot, m))
         s.spans["fbar"] = spans
 
+    def note(s, text):  # a line in the log, timed
+        s.log.append(f"{time.strftime('%H:%M:%S')} {text}")
+
     def frame(s):
         sc = s.scr
         sc.erase()
@@ -1237,9 +1277,9 @@ class App:
         if fit_ and (len(fit_[0]) == 1) != s.single:
             s.single = len(fit_[0]) == 1
             if s.single:  # said once, and short: it shows when room is short
-                s.log.append(f"{time.strftime('%H:%M:%S')} one pane: Tab swaps")
+                s.note("one pane: Tab swaps")
         if s.msg:  # every message lands in the log, which follows the newest
-            s.log.append(f"{time.strftime('%H:%M:%S')} {s.msg}")
+            s.note(s.msg)
             s.msg, s.logoff = "", 0
         if not fit_:
             return sc.addstr(0, 0, fit(f"too small: {W}×{H}, needs {MIN_W}×{MIN_H}", W - 1))
@@ -1269,7 +1309,7 @@ class App:
                 s.paint_log(A + 1 + k, ln, W)
             s.paint_work()
             if s.typing:
-                hint = "⏎ apply  Esc clear" if s.typing == "/" else ""
+                hint = "Enter apply  Esc clear" if s.typing == "/" else ""
                 q = f" / {s.P.v.flt}" if s.typing == "/" else f" {s.typing}"
                 sc.addstr(H - 1, 0, bar(q, hint, W), s.C["acc"] | curses.A_BOLD)
                 sc.move(H - 1, min(cells(q), W - 2))

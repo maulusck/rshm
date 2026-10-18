@@ -6,6 +6,8 @@ from pathlib import Path
 
 from rshm import config, edit, fs, screen, sftp, ssh, ui, view
 
+screen.ASCII = False  # these checks are of a UTF-8 terminal, whatever this machine's locale; ASCII has its own below
+
 # config: a host is an ssh destination; a table is a group; a list is a group of destinations named as themselves
 h = config.tree(tomllib.loads("""
 [hosts]
@@ -130,7 +132,7 @@ assert rd.attrs() == {"size": 1536, "uid": 1, "gid": 2, "perm": 0o40755, "mtime"
 assert fs.islink({"perm": 0o120777}) and not fs.isdir({"perm": 0o120777})
 
 # screen helpers: keys, sizes; hostile names can't drive the terminal
-assert ui.codes("x Del") == [ord("x"), curses.KEY_DC] and 10 in ui.codes("⏎") and ui.codes("F5 c") == [curses.KEY_F5, 99]
+assert ui.codes("x Del") == [ord("x"), curses.KEY_DC] and 10 in ui.codes("Enter") and ui.codes("F5 c") == [curses.KEY_F5, 99]
 assert [screen.human(n) for n in (None, 0, 1023, 1536, 5 * 1024 ** 5)] == ["", "0B", "1023B", "1.5K", "5120.0T"]
 assert screen.safe("a\x1b[2Jb\nc" + name) == "a?[2Jb?ccaf??"
 gone = Path(tempfile.mkdtemp())  # the local folder vanishing underneath us: home, never a crash
@@ -146,6 +148,31 @@ assert [f"F{n} {w}" for n, w, _ in ui.fkeys()] == ["F1 help", "F2 menu", "F3 vie
 assert all(ui.menu_rows(m) for m in ui.MENUS) and {r[0] for r in ui.KEYS} - {None} == {"Pane", "File", "Mark", "Command", "Options"}
 assert ui.menu_rows("Pane 1") == ui.menu_rows("Pane 2") and "copy to the other pane" in ui.keys_help()
 assert all(len(th) == len(ui.ROLES) and all(-1 <= c < 256 for x in th for c in x[:2]) for th in ui.THEMES.values())
+
+# a terminal that isn't UTF-8: told by its locale (the first of LC_ALL, LC_CTYPE, LANG set), not by what Python makes
+for env, utf in (({"LANG": "en_US.UTF-8"}, True), ({"LC_ALL": "C.utf8"}, True), ({"LC_CTYPE": "C.UTF-8"}, True),
+                 ({"LANG": "C"}, False), ({"LANG": "POSIX"}, False), ({}, False), ({"LANG": "de_DE.ISO-8859-1"}, False),
+                 ({"LC_ALL": "C", "LANG": "en_US.UTF-8"}, False), ({"LC_ALL": "", "LANG": "en_GB.UTF-8"}, True)):
+    got = subprocess.run([sys.executable, "-c", "from rshm import screen; print(screen.ASCII)"], capture_output=True,
+                         text=True, cwd=Path(__file__).parent, env={"PATH": os.environ["PATH"], **env}).stdout.strip()
+    assert got == str(not utf), (env, got)
+screen.ASCII = True  # then each character drawn is one ASCII one, and measured as one: nothing shifts
+glyphs = "─│┌┐└┘├┤┬┴✓✗…→←↑↓·×●○▸▾▲▼⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+assert screen.plain(glyphs) == "-|++++++++" "+!~" "><^v" "-x*o>v^v" "|/-\\|/-\\|/" and screen.plain("日本 e\u0301") == "?? e?"
+assert screen.cells("日本e\u0301") == 4 and screen.fit("very_long_name.tar.gz", 12, "mid") == "very_…tar.gz"
+assert screen.plain(screen.fit("日本語のファイル名.txt", 11, "mid")) == "?????~?.txt" and ui.keys_help().isascii()
+drawn = []
+win = types.SimpleNamespace(addstr=lambda *a: drawn.append(a), insstr=lambda *a: drawn.append(a), getmaxyx=lambda: (5, 9))
+w = screen.window(win)
+w.addstr(0, 0, "┌─ ✓ 日", 7)
+w.insstr(1, 2, "┘")
+assert drawn == [(0, 0, "+- + ?", 7), (1, 2, "+")] and w.getmaxyx() == (5, 9)
+screen.ASCII = False
+assert screen.window(win) is win and screen.plain("┌✓") == "┌✓" and "Enter" in ui.keys_help()
+old = curses.curs_set  # a terminal that can't hide its cursor (vt100): nothing breaks
+curses.curs_set = lambda on: (_ for _ in ()).throw(curses.error("curs_set() returned ERR"))
+screen.cursor(0)
+curses.curs_set = old
 assert set(ui.MONO) == set(ui.ROLES) and {fs.kind(*e) for e in (("x", {"perm": 0o100644}),)} <= set(ui.ROLES)
 
 # what an entry is: one kind decides its colour, ls -F its marker; the ls -l line of it; what a sync would copy
@@ -583,6 +610,35 @@ for at, dst in (("mkdir", "new"), ("chattr", "new2"), (None, "real.txt")):  # a 
 # the command line: errors before any screen; the single file it writes of itself
 import contextlib  # noqa: E402
 from rshm import __main__ as cli  # noqa: E402
+
+
+real_terminal, tty = cli.terminal, (sys.stdin, sys.stdout)  # the terminal, every way it can be (test_live.py: real ones)
+
+
+def term(known, cup=True, istty=True, name="xterm-kitty"):  # terminal() with terminfo knowing these -> note, or exit
+    sys.stdin = sys.stdout = types.SimpleNamespace(isatty=lambda: istty)
+    os.environ["TERM"] = name
+
+    def setupterm():
+        if os.environ["TERM"] not in known:
+            raise curses.error("setupterm: could not find terminal")
+    cli.curses = types.SimpleNamespace(setupterm=setupterm, tigetstr=lambda c: b"\x1b[H" if cup else None,
+                                       error=curses.error)
+    try:
+        return real_terminal()
+    except SystemExit as e:
+        return e.code
+    finally:
+        sys.stdin, sys.stdout = tty
+
+
+was = os.environ.get("TERM", "")
+assert term({"xterm-kitty"}) == "" and term({"xterm-256color"}) == "TERM=xterm-kitty is unknown here: drawn as xterm-256color"
+assert os.environ["TERM"] == "xterm-256color" and term(set()).startswith("rshm: no terminfo for TERM=xterm-kitty here")
+assert term({"dumb"}, cup=False, name="dumb") == "rshm needs a terminal that can move its cursor; TERM=dumb can't"
+assert term({"xterm"}, istty=False) == "rshm needs a terminal"
+os.environ["TERM"] = was
+cli.terminal = lambda: ""  # below, main() in this process: no terminal here
 
 
 def run(*args, wrapper=None):  # rshm ARGS in this process -> (exit code, stderr)

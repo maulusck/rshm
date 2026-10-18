@@ -13,7 +13,7 @@ python3 rshm.pyz web db       # one host in each pane: copy straight between the
 Copy it into your PATH as `rshm` for a plain command (or `pip install .`). rshm makes the single file of itself,
 from wherever it runs (this source, a pip install, a `.pyz`): `python3 -m rshm --pyz rshm.pyz`.
 
-Linux, macOS, BSD or Termux, a UTF-8 terminal, OpenSSH 8.4+. Servers: anything that speaks SFTP (OpenSSH,
+Linux, macOS, BSD or Termux, any terminal (see Terminals below), OpenSSH 8.4+. Servers: anything that speaks SFTP (OpenSSH,
 Windows OpenSSH, Dropbear with sftp-server, SFTP-only and chrooted accounts).
 
 ## Screen
@@ -40,23 +40,25 @@ one above the other when the terminal stands upright (a phone, Termux), one at a
 
 | Key | Does |
 |---|---|
-| `⏎` `→` `l` · `←` `h` `⌫` | open: folder, your `[open]` match, archive, else view · up (out of an archive, out of find results) |
+| `Enter` `→` `l` · `←` `h` `Bksp` | open: folder, your `[open]` match, archive, else view · up (out of an archive, out of find results) |
 | `F3` `v` · `F4` `e` · `i` | view · edit (on the host list: the config) · info |
 | `F5` `c` · `F6` `m` | copy · move to the other pane (mode and times travel; links stay links) |
 | `F7` `n` · `F8` `x` `Del` · `R` | new folder · delete · rename |
 | `A` · `L` · `H` · `z` | attributes: mode, owner, time, one row each · symlink to the entry, where you say (on a link: where it points) · hard link, where you say · size |
 | `Space` `Ins` · `*` · `+` `-` · `D` | mark · all / none · by pattern · what differs from the other pane |
-| `S` · `.` · `/` · `^F` | sort: name, extension, size, date, reverse · dotfiles · filter (`⏎` applies) · find |
+| `S` · `.` · `/` · `^F` | sort: name, extension, size, date, reverse · dotfiles · filter (`Enter` applies) · find |
 | `b` `f` · `g` · `~` · `o` · `^U` | history back / forward · go to · home · other pane here · swap panes |
 | `F2` · `^O` `s` · `p` | menu of what's under the cursor, your `[commands]` last · shell here (on the host list: on that host) · live check (never asks for a login) |
-| `Tab` · `@` · `Esc` · `r` · `t` · `[` `]` · `^L` · `F10` `q` | other pane · host list · back: filter, marks, find results, host list; stops what's running · reload · theme · log · draw the screen again · quit |
+| `Tab` · `@` · `Esc` · `r` · `t` · `[` `]` · `^L` · `F10` `q` | other pane · host list · back: filter, marks, find results, host list; stops what's running · reload · theme: pick one · log · draw the screen again · quit |
 
 Every question line edits like a shell's: `←` `→` `Home` `End` `Del`, `^A` `^E` `^K` `^U` `^W`. An answer it offers
-is selected: type to replace it, `⌫` clears it, `⏎` takes it. Where it asks for a path, `Tab` completes it, here or on
-a host (as far as the names agree, then each in turn); in a form, `↑` `↓` `Tab` move between rows. Mouse and touch: tap selects, a second tap opens (a host too); right-click opens the
-menu of what's under it (`F2`); the wheel scrolls panes, the log, menus, viewer and editor. The viewer has less's keys (`space` `b` `g` `G`
-`/` `?` `n` `N`, `N g` for line N, `w` wrap, `x` hex), the editor nano's (`^S` save, `^X` exit, `^W` find,
-`^\` replace, `^K` `^U` cut and paste lines, `^_` line, `^Z` undo).
+is selected: type to replace it, `Bksp` clears it, `Enter` takes it. Where it asks for a path, `Tab` completes it, here
+or on a host (as far as the names agree, then each in turn); in a form, `↑` `↓` `Tab` move between rows.
+
+Mouse and touch: tap selects, a second tap opens (a host too); right-click opens the menu of what's under it (`F2`);
+the wheel scrolls panes, the log, menus, viewer and editor. The viewer has less's keys (`space` `b` `g` `G` `/` `?`
+`n` `N`, `N g` for line N, `w` wrap, `x` hex), the editor nano's (`^S` save, `^X` exit, `^W` find, `^\` replace,
+`^K` `^U` cut and paste lines, `^_` line, `^Z` undo).
 
 ## Config
 
@@ -65,14 +67,15 @@ default, which shows every option. It is the first of: `-c FILE`, `rshm.toml` ne
 it), `$XDG_CONFIG_HOME/rshm.toml` (`~/.config`).
 
 ```toml
-theme = "default"                         # default matrix amber frutiger teletext
+theme = "default"                         # default matrix amber frutiger teletext avionics
+                                          # robot cyberwave steel paper ember
 include = []                              # more files beside this one, whose [hosts] join these
 
 [tools]                                   # empty: $VISUAL, $EDITOR, $PAGER, else rshm's own
 edit = ""                                 # "nvim", "code -w {file}"
 view = ""                                 # "less -R", "bat --paging=always"
 
-[open]                                    # ⏎ on a file: the first matching pattern runs its command
+[open]                                    # Enter on a file: the first matching pattern runs its command
 # "*.pdf *.djvu" = "zathura {file}"
 
 [commands]                                # F2, in the pane's folder: {name} {names} {dir} {other}
@@ -102,6 +105,19 @@ view = ""                                 # "less -R", "bat --paging=always"
 | Logins | one per host, shared by both panes and every transfer; tried quietly first (keys, agent, your `SSH_ASKPASS`), else ssh asks; either way with the terminal handed over, so a passphrase prompt (gpg-agent's pinentry too) gets a clean screen and rshm's is drawn whole after |
 | Exit | quitting, `kill` or a closed terminal ends every login rshm started and removes its copies |
 
+## Terminals
+
+rshm draws with what the terminal has, and never more:
+
+| Has | rshm |
+|---|---|
+| UTF-8 (your locale: the first of `LC_ALL`, `LC_CTYPE`, `LANG` set says so) | box lines, ✓ ✗, arrows; else ASCII, mc's way: `+-\|` frames, `+` `!` for ✓ ✗, `~` where a name is cut, `?` for what ASCII lacks |
+| 256 colours | every theme: `t` lists the ones this terminal shows, the pick saved |
+| 8 or 16 | the default theme, in the terminal's own colours, when the theme you chose needs more; your choice kept for the terminals that show it |
+| none, or `NO_COLOR` set | bold, reverse and dim |
+| a `TERM` this machine doesn't know (kitty, ghostty… over ssh) | drawn as `xterm-256color`, said once in the log |
+| no way to place its cursor (`TERM=dumb`), or no terminal at all | a plain refusal |
+
 ## Limits
 
 | Limit | Note |
@@ -115,6 +131,7 @@ view = ""                                 # "less -R", "bat --paging=always"
 | `kill -9` | logins linger until 5 idle minutes pass |
 | `Ctrl-C` during a login | waits for ssh's own timeout (8 s): the terminal is the login's then |
 | root-only files | as the user your ssh config logs in as: no sudo; a host alias logging in as root reaches them |
+| not UTF-8 | names in other scripts show as `?`, which that terminal couldn't show anyway: a UTF-8 `LANG` shows them |
 
 ## Code
 
@@ -125,7 +142,7 @@ view = ""                                 # "less -R", "bat --paging=always"
 | `sftp.py` | the SFTP v3 client |
 | `fs.py` | one file system interface: `Local`, `Remote`, `Archive`; copy, delete, save, walk across any of them; `kind()` |
 | `ui.py` | the screen; `KEYS` is the one table behind keys, menus, F-keys, F1 and `--help`; `THEMES` colour by role |
-| `view.py` `edit.py` `screen.py` | the built-in viewer and editor, and text measured and fitted in terminal cells |
+| `view.py` `edit.py` `screen.py` | the built-in viewer and editor; text measured and fitted in terminal cells, and drawn as the terminal shows it |
 
 A new action: a method on `App` and one row in `KEYS`. A new place to browse: a class with `fs.py`'s primitives.
 
@@ -135,7 +152,7 @@ A new action: a method on `App` and one row in `KEYS`. A new place to browse: a 
 |---|---|
 | `python3 test_rshm.py` | the logic, offline: config and its default, hosts, layouts, text width, kinds, every copy direction, links, times, attributes, archives, find, compare, sort, viewer and editor |
 | `python3 test_stress.py` | proof against a real `sftp-server`, seeded (`RSHM_SEED`, `RSHM_TREES`): random trees (odd names, sizes, modes, links, pipes) copied every way and held against `cp -a`; the link dropped before any reply, `Ctrl-C` before any reply, a full disk, a shrinking source, a server that won't set modes, prints a banner or reads short; text, editor, wire and config fuzzed |
-| `python3 test_app.py` | the whole app in this process on a strict virtual terminal (a write past an edge fails): every branch the screen test doesn't press, then a monkey of random keys, taps and sizes (`RSHM_MONKEY`); jailed to a temp folder, no network |
-| `python3 test_live.py` | the `rshm.pyz` it builds of itself, on a real screen in a terminal: every key, menus and taps, every screen through every size, the layouts as the terminal turns and shrinks; then hosts through a throwaway sshd and a jump. Any terminal (`RSHM_TERM=screen` …: keys from its terminfo). As you, in a temp folder removed afterwards (needs `pyte`; the host part needs `sshd`) |
+| `python3 test_app.py` | the whole app in this process on a strict virtual terminal (a write past an edge fails): every branch the screen test doesn't press, then a monkey of random keys, taps and sizes (`RSHM_MONKEY`), on every kind of terminal (UTF-8 or not, 256 colours, 8, none, a cursor it can't hide); jailed to a temp folder, no network |
+| `python3 test_live.py` | the `rshm.pyz` it builds of itself, on a real screen in a terminal: every key, menus and taps, every screen through every size, the layouts as the terminal turns and shrinks; the terminals (vt100 in ASCII, a `TERM` unknown here, `NO_COLOR`, `dumb`, none); then hosts through a throwaway sshd and a jump. Any terminal (`RSHM_TERM=screen` …: keys from its terminfo). As you, in a temp folder removed afterwards (needs `pyte`; the host part needs `sshd`) |
 
 Together they run every line of rshm (measured with the stdlib `trace`, the screen child included), on Python 3.11 to 3.13.

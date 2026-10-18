@@ -2,7 +2,7 @@
 line, ^Z undo. Tabs, wide characters, CRLF and bytes it can't decode come back exactly as they were."""
 import curses, re
 
-from .screen import CLICK, WHEEL_DOWN, WHEEL_UP, bar, cell, cells, readline, safe, span
+from .screen import CLICK, WHEEL_DOWN, WHEEL_UP, bar, cell, cells, cursor, readline, safe, span
 
 TAB = 8
 
@@ -113,7 +113,7 @@ def edit(scr, data, title, C, save):  # save(bytes) stores it; an OSError from i
     curses.raw()  # ^S ^Z ^C ^\\ are keys here, not terminal flow control or signals
     try:
         while True:
-            curses.curs_set(1)
+            cursor(1)
             H, W = scr.getmaxyx()
             col = cells(show(b.lines[b.y][:b.x]))
             top = min(max(top, b.y - H + 2), b.y)
@@ -192,4 +192,4 @@ def edit(scr, data, title, C, save):  # save(bytes) stores it; an OSError from i
     finally:
         curses.noraw()
         curses.cbreak()
-        curses.curs_set(0)
+        cursor(0)

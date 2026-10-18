@@ -2,7 +2,7 @@
 w wrap, x hex, q back. Binary opens as hex. The wheel scrolls."""
 import curses
 
-from .screen import MOVES, WHEEL_DOWN, WHEEL_UP, bar, readline, safe, span, wrap
+from .screen import MOVES, WHEEL_DOWN, WHEEL_UP, bar, cursor, readline, safe, span, wrap
 
 
 def hexrow(data, i):  # row i of a hex dump: offset, 16 bytes, their printable side
@@ -28,7 +28,7 @@ def text(data):  # bytes as lines to show: CRLF or LF, tabs to 8, bytes that are
 def view(scr, data, title, C):  # C: the theme's colours by role
     hexed, wrapped, top, q, msg, hit, count = b"\0" in data[:8192], True, 0, "", "", None, ""  # hit: the last match
     lines = text(data)
-    curses.curs_set(0)
+    cursor(0)
     while True:
         H, W = scr.getmaxyx()
         if hexed:

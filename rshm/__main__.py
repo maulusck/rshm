@@ -21,6 +21,25 @@ def pyz(out):  # this very rshm as one runnable file, from wherever it runs (sou
     os.replace(tmp, out)
 
 
+def terminal():  # the terminal ncurses will draw on -> a note for the log. A TERM this machine has no entry for
+    term = os.environ.get("TERM", "")  # (kitty, ghostty over ssh) is drawn as xterm-256color, which every modern one
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):  # speaks; one that can't place its cursor (dumb): refused
+        sys.exit("rshm needs a terminal")
+    note = ""
+    try:
+        curses.setupterm()
+    except curses.error:
+        os.environ["TERM"] = "xterm-256color"
+        try:
+            curses.setupterm()
+        except curses.error:
+            sys.exit(f"rshm: no terminfo for TERM={term or '(unset)'} here, nor for xterm-256color")
+        note = f"TERM={term or '(unset)'} is unknown here: drawn as xterm-256color"
+    if not curses.tigetstr("cup"):
+        sys.exit(f"rshm needs a terminal that can move its cursor; TERM={term} can't")
+    return note
+
+
 def main():
     ap = argparse.ArgumentParser(prog="rshm", description="Remote SHell Manager: a two-pane file manager for this "
                                  "machine and every host in your ~/.ssh/config, over plain ssh.",
@@ -51,9 +70,10 @@ def main():
             start.append(m[0][0])
     for sig in (signal.SIGTERM, signal.SIGHUP):  # kill or a closed terminal unwind normally: terminal and logins cleaned
         signal.signal(sig, lambda n, _: sys.exit(128 + n))
+    note = terminal()
     atexit.register(logout)
     try:
-        curses.wrapper(lambda scr: App(scr, cfg).loop(start))
+        curses.wrapper(lambda scr: App(scr, cfg, note).loop(start))
     except KeyboardInterrupt:
         pass
     except curses.error as e:

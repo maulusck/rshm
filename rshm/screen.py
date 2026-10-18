@@ -1,5 +1,6 @@
-"""What every screen of rshm shares: text measured in terminal cells, fitted to a width, the one-line input."""
-import contextlib, curses, os, unicodedata
+"""What every screen of rshm shares: text measured in terminal cells, fitted to a width, the one-line input, and
+how it reaches a terminal that isn't UTF-8."""
+import contextlib, curses, os, sys, unicodedata
 
 MOVES = {curses.KEY_UP: -1, ord("k"): -1, curses.KEY_DOWN: 1, ord("j"): 1, curses.KEY_PPAGE: -10, curses.KEY_NPAGE: 10,
          curses.KEY_HOME: -1 << 30, curses.KEY_END: 1 << 30}
@@ -7,12 +8,52 @@ WHEEL_UP, WHEEL_DOWN = curses.BUTTON4_PRESSED, getattr(curses, "BUTTON5_PRESSED"
 CLICK, RIGHT = curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED, curses.BUTTON3_PRESSED | curses.BUTTON3_CLICKED
 
 
+def utf8():  # does the terminal take UTF-8? Its locale says, read as tmux reads it: the first of LC_ALL, LC_CTYPE,
+    for k in ("LC_ALL", "LC_CTYPE", "LANG"):  # LANG that's set. Python puts C.UTF-8 in LC_CTYPE over a C locale (its
+        v = os.environ.get(k, "")             # UTF-8 mode on): that one is Python's, not the terminal's
+        if v and not (k == "LC_CTYPE" and v == "C.UTF-8" and sys.flags.utf8_mode):
+            return "UTF-8" in v.upper().replace("UTF8", "UTF-8")
+    return False
+
+
+ASCII = not utf8()  # decided once: a terminal that isn't UTF-8 gets one ASCII character for each one drawn
+GLYPHS = str.maketrans("─│┌┐└┘├┤┬┴" "✓✗…" "→←↑↓" "·×●○▸▾▲▼" "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",  # frames, marks, arrows, signs, spinner
+                       "-|++++++++" "+!~" "><^v" "-x*o>v^v" "|/-\\|/-\\|/")
+
+
+def plain(s):  # s as this terminal shows it: as is on UTF-8; else ASCII, one character for each (frames +-|, ✓ +, ✗ !,
+    return s.translate(GLYPHS).encode("ascii", "replace").decode() if ASCII else s  # cuts ~, spinner |/-\, ? the rest)
+
+
+class Plain:  # a window on a terminal that isn't UTF-8: everything drawn goes through plain()
+    def __init__(s, win):
+        s.win = win
+
+    def __getattr__(s, name):
+        return getattr(s.win, name)
+
+    def addstr(s, y, x, text, *attr):
+        s.win.addstr(y, x, plain(text), *attr)
+
+    def insstr(s, y, x, text, *attr):
+        s.win.insstr(y, x, plain(text), *attr)
+
+
+def window(win):  # how rshm draws on win: as is, or (not UTF-8) through Plain
+    return Plain(win) if ASCII else win
+
+
+def cursor(on):  # show or hide the cursor: cosmetic, so a terminal that can't (vt100) keeps it as it is
+    with contextlib.suppress(curses.error):
+        curses.curs_set(on)
+
+
 def safe(s):  # file names and contents are arbitrary bytes: never let them drive the terminal
     return "".join(c if c.isprintable() else "?" for c in s)
 
 
-def cell(c):  # the cells one character takes: 2 wide (CJK, emoji), 0 combining, else 1
-    return 0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in "WF" else 1
+def cell(c):  # the cells one character takes: 2 wide (CJK, emoji), 0 combining, else 1; not UTF-8: 1, as plain() draws it
+    return 1 if ASCII else 0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in "WF" else 1
 
 
 def cells(s):
@@ -80,7 +121,7 @@ def bar(left, right, W, keep="end"):  # a status line W-1 cells wide: right kept
 
 def line(scr, q, text="", attr=0, back=None, ends=(), complete=None):  # the one-line editor on the bottom row
     i, fresh, cyc, k = len(text), bool(text), None, 0  # -> (text, the key that ended it: ⏎, Esc (^C too), or one of
-    curses.curs_set(1)  # ends); back() repaints behind it. ← → Home End Del ^A ^E ^K ^U ^W edit. A prefilled answer
+    cursor(1)  # ends); back() repaints behind it. ← → Home End Del ^A ^E ^K ^U ^W edit. A prefilled answer
     try:                # is selected (typing replaces it, ⌫ clears it); Tab: complete(typed) -> what it can become
         while True:
             back and back()
@@ -135,7 +176,7 @@ def line(scr, q, text="", attr=0, back=None, ends=(), complete=None):  # the one
     except KeyboardInterrupt:
         return text, "\x1b"
     finally:
-        curses.curs_set(0)
+        cursor(0)
 
 
 def readline(scr, q, text="", attr=0, back=None, complete=None):  # ⏎ takes the line as typed, Esc or ^C: None

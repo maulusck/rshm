@@ -12,6 +12,8 @@ for v in ("EDITOR", "VISUAL", "PAGER", "XDG_CONFIG_HOME"):
 from rshm import edit, fs, screen, ui, view  # noqa: E402  (after HOME is set)
 from rshm.screen import cell, cells  # noqa: E402
 
+screen.ASCII = False  # a UTF-8 terminal, whatever this machine's locale; the monkey also runs the ASCII one
+
 rnd = random.Random(int(os.environ.get("RSHM_SEED", 1)))
 ERRORS = []  # every write past an edge, wherever the app would hide it
 
@@ -36,6 +38,8 @@ class VT:  # a terminal (or a window on one) of H×W cells, its keys from a scri
     def addstr(t, y, x, s, attr=0):
         if not (0 <= y < t.H and 0 <= x < t.W) or x + cells(s) > t.W:
             t.fail(f"addstr {y},{x} +{cells(s)}")
+        if screen.ASCII and not s.isascii():  # a terminal that isn't UTF-8 gets nothing else
+            t.fail(f"not ASCII: {s!r}")
         for c in s:
             t.root.cells[t.y0 + y, t.x0 + x] = c
             x += cell(c)
@@ -449,19 +453,54 @@ if SRV:
 os.chdir(W)
 app = start("/big", "\n", "v")
 assert "(the first 1.0M of 5.0M)" in SCR.final and "line" in SCR.final
-more(app, K.F4, "\x1b", "\x1b", "g", "\x03", "t", "t", "t", "t", "t")
-assert "big is 5.0M: more than rshm's editor takes (1.0M)" in log(app) and app.theme_name == "default"
+more(app, K.F4, "\x1b", "\x1b", "g", "\x03")
+assert "big is 5.0M: more than rshm's editor takes (1.0M)" in log(app)
 os.chdir(BOX)
-FAKE.COLORS = 8
-app = start("t")
-assert app.C is ui.MONO and "mono" in log(app)
-FAKE.COLORS = 256
 (W / "big").unlink()
+
+# themes: t picks one this terminal can show, the pick saved; fewer colours than a theme needs: the default theme;
+CFG.write_text('theme = "amber"\n')  # none, NO_COLOR, or no colours of its own where a theme needs them: bold, reverse
+app = start("t", K.END, "\n")
+last = list(ui.THEMES)[-1]
+assert app.theme_name == last and f'theme = "{last}"' in CFG.read_text() and "instead" not in log(app)
+CFG.write_text('theme = "amber"\n')
+FAKE.COLORS = 8
+app = start("t", K.DOWN, "\n")  # only what this terminal shows is offered: here the default theme alone
+assert app.theme_name == "default" and app.C is not ui.MONO and [n for n in ui.THEMES if app.can(n)] == ["default"]
+assert "theme amber: this terminal shows 8 colours; default instead" in log(app), log(app)
+FAKE.COLORS = 256
+os.environ["NO_COLOR"] = "1"
+CFG.write_text('theme = "amber"\n')
+app = start("t")
+assert app.C is ui.MONO and "theme amber: NO_COLOR is set; bold and reverse instead" in log(app)
+assert "no theme to pick: NO_COLOR is set" in log(app) and 'theme = "amber"' in CFG.read_text()  # the choice stays
+os.environ["NO_COLOR"] = ""  # set but empty: colours (no-color.org)
+assert start().C is not ui.MONO
+del os.environ["NO_COLOR"]
+FAKE.has_colors = lambda: False
+app = start("t")
+assert app.C is ui.MONO and "this terminal shows no colours" in log(app)
+FAKE.has_colors = lambda: True
+FAKE.use_default_colors = lambda: (_ for _ in ()).throw(real.error("no default colours"))
+CFG.write_text('theme = "default"\n')  # the default theme uses the terminal's own colours: here, none to use
+app = start()
+assert app.C is ui.MONO and not app.can("default") and app.can("matrix")
+FAKE.COLORS = 8  # and 8 colours: no theme at all to pick, and the reason given is the real one
+more(app, "t")
+assert "no theme to pick: this terminal shows 8 colours" in log(app)
+FAKE.COLORS = 256
+FAKE.use_default_colors = nop
+CFG.write_text("")
 
 # --- the monkey: random keys, taps and sizes; never an error that isn't an OSError, never a write off the screen ---
 TYPES = {n for n, v in vars(builtins).items() if isinstance(v, type) and issubclass(v, BaseException)} | {"error"}
 keys = [*"\n\t \x1b*+-.@[]~/abcdefghijklmnopqrstuvwxyzADHLRSz?\x06\x0f\x12\x15\x03", *(getattr(K, n) for n in vars(K))]
+MODES = [{}, {"ASCII": True}, {"ASCII": True, "COLORS": 8, "curs_set": True}, {"NO_COLOR": True}]  # every terminal
 for run in range(int(os.environ.get("RSHM_MONKEY", 40))):
+    mode = MODES[run % len(MODES)]
+    screen.ASCII, FAKE.COLORS = mode.get("ASCII", False), mode.get("COLORS", 256)
+    FAKE.curs_set = (lambda on: (_ for _ in ()).throw(real.error("curs_set() returned ERR"))) if "curs_set" in mode else nop
+    os.environ.pop("NO_COLOR", None) if "NO_COLOR" not in mode else os.environ.update(NO_COLOR="1")
     shutil.rmtree(W, ignore_errors=True)
     (W / "sub" / "deep").mkdir(parents=True)
     for i in range(8):
@@ -485,8 +524,10 @@ for run in range(int(os.environ.get("RSHM_MONKEY", 40))):
     bad = [ln for ln in app.log if re.search(rf"✗ ({'|'.join(TYPES)}): ", ln)]
     assert not bad, (run, bad)
     wrong = [e for e in ERRORS if (lambda h, w: h >= ui.MIN_H and w >= ui.MIN_W)(*map(int, e.split(" at ")[1].split("x")))]
-    assert not wrong, (run, sorted(set(wrong))[:9])  # below the least size: only never a crash
+    assert not wrong, (run, mode, sorted(set(wrong))[:9])  # below the least size: only never a crash
     ERRORS.clear()
+screen.ASCII, FAKE.COLORS, FAKE.curs_set = False, 256, nop
+os.environ.pop("NO_COLOR", None)
 assert not left(), f"private copies left behind: {left()}"
 os.chdir("/")
 shutil.rmtree(BOX)

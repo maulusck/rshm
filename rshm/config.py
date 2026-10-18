@@ -5,14 +5,15 @@ from pathlib import Path
 
 SSH_CONFIG = Path.home() / ".ssh" / "config"
 SAMPLE = """\
-theme = "default"                         # default matrix amber frutiger teletext
+theme = "default"                         # default matrix amber frutiger teletext avionics
+                                          # robot cyberwave steel paper ember
 include = []                              # more files beside this one, whose [hosts] join these
 
 [tools]                                   # empty: $VISUAL, $EDITOR, $PAGER, else rshm's own
 edit = ""                                 # "nvim", "code -w {file}"
 view = ""                                 # "less -R", "bat --paging=always"
 
-[open]                                    # ⏎ on a file: the first matching pattern runs its command
+[open]                                    # Enter on a file: the first matching pattern runs its command
 # "*.pdf *.djvu" = "zathura {file}"
 
 [commands]                                # F2, in the pane's folder: {name} {names} {dir} {other}

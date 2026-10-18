@@ -4,7 +4,8 @@
 2. hosts (when sshd is here): a throwaway sshd, reached through a jump set up in an ssh config as it should be;
    open, copy with the keys, a shell, a tree both ways, a copy within the host, the live check; nothing left behind
 Runs as you, in a temp folder removed afterwards, sshd on a free local port. No root, no network, no other users."""
-import contextlib, curses, fcntl, hashlib, os, pty, select, shutil, signal, socket, struct, subprocess, sys, tempfile, termios, time
+import contextlib, curses, fcntl, hashlib, os, pty, re, select, shutil, signal, socket, struct, subprocess, sys, tempfile
+import termios, time
 from pathlib import Path
 
 try:
@@ -42,20 +43,23 @@ curses.setupterm(TERM, sys.__stdout__.fileno())
 cap = lambda c: (curses.tigetstr(c) or b"").decode()
 KEY = {**{f"F{i}": cap(f"kf{i}") for i in range(1, 11)}, "Up": cap("kcuu1"), "Down": cap("kcud1"), "Right": cap("kcuf1"),
        "Left": cap("kcub1"), "Esc": "\x1b", "Tab": "\t", "Enter": "\r", **{f"^{c}": chr(ord(c) - 64) for c in "FKOSUX"}}
+COLOURS = curses.tigetnum("colors")  # 256, 8, or none (-1, -2)
 MOUSE = cap("kmous")  # "\x1b[<": SGR; "\x1b[M": X10 bytes; none: the mouse steps are skipped
 SIZES = [(1, 1), (2, 10), (3, 3), (6, 19), (7, 20), (8, 24), (24, 80), (12, 40), (40, 60), (4, 200), (60, 30), (24, 81)]
 
 
 class Term:  # one rshm in a pseudo terminal, its screen kept by pyte
-    def __init__(t, args, cwd, rows=30, cols=120):
+    def __init__(t, args, cwd, rows=30, cols=120, env=()):  # env: what this terminal is (TERM, LANG, NO_COLOR)
         t.screen, t.raw = Screen(cols, rows), []
         t.stream = Stream(t.screen)
         t.pid, t.fd = pty.fork()
         if not t.pid:
             os.chdir(cwd)
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-            os.environ["TERM"], os.environ["GPG_TTY"] = TERM, os.ttyname(0)
-            os.environ.pop("PYTHONPATH", None)
+            os.environ["TERM"], os.environ["GPG_TTY"], os.environ["LANG"] = TERM, os.ttyname(0), "C.UTF-8"
+            for k in ("PYTHONPATH", "LC_ALL", "LC_CTYPE", "NO_COLOR"):
+                os.environ.pop(k, None)
+            os.environ.update(env)
             run = os.environ.get("RSHM_RUN", sys.executable).split()  # RSHM_RUN: a python to run it with (a tracer)
             os.execvp(run[0], [*run, str(T / "rshm.pyz"), *args])  # finds rshm.toml beside it
 
@@ -277,9 +281,13 @@ try:
     t.until(lambda s: "▸ here" in s and "jumped" not in s, "group folded")
     t.keys("F4")
     t.until(lambda s: "[hosts]" in s and "^S save" in s, "config in the editor")
-    t.keys("^X", "Esc", "t")
-    t.until(lambda s: "theme: matrix" in s, "theme")
-    assert 'theme = "matrix"' in (T / "rshm.toml").read_text()
+    t.keys("^X", "Esc", "t")  # the themes this terminal can show: 256 colours all, 8 the default one, none none
+    if COLOURS >= 8:
+        t.until(lambda s: "─ theme " in s and re.search(r"default +✓", s) and ("matrix" in s) == (COLOURS >= 256), "theme picker")
+        t.keys("Enter")
+        t.until(lambda s: "theme: default" in s, "theme")
+    else:
+        t.until(lambda s: "no theme to pick: this terminal shows no colours" in s, "no colours, no themes")
     t.keys("F1")
     t.until(lambda s: "copy to the other pane" in s and "F5 c" in s, "help: every key")
     t.keys("Esc", "F9")  # the menu bar: F9, ← → between menus (one open, lit in the bar), Esc; taps on menus and items
@@ -294,9 +302,10 @@ try:
     if MOUSE:  # taps: bar, menu item, F-key bar, titles, rows, right-click (no mouse in this terminal: keys only)
         t.click(0, rows(t.text())[0].index("Options") + 1)
         t.until(lambda s: "edit config" in s and "theme" in s, "Options by a tap")
-        y = next(i for i, r in enumerate(rows(t.text())) if __import__("re").search(r"theme +t ", r))
+        y = next(i for i, r in enumerate(rows(t.text())) if re.search(r"theme: pick one +t ", r))
         t.click(y, rows(t.text())[y].index("theme") + 1)
-        t.until(lambda s: "theme: amber" in s, "an item by a tap")
+        t.until(lambda s: "─ theme " in s, "an item by a tap: the theme picker")
+        t.keys("Esc")
         t.click(len(rows(t.text())) - 1, rows(t.text())[-1].index("7mkdir") + 1)  # the F-key bar answers taps
         t.until(lambda s: "new folder:" in s, "F7 by a tap")
         t.keys("Esc")
@@ -342,6 +351,43 @@ try:
     t.sweep(lambda s: "copy to the other pane" in s, "help")
     t.keys("Esc")
     assert t.quit() == 0
+
+    # --- terminals: each draws what it can, nothing it can't ---
+    t = Term([], B, env={"TERM": "vt100", "LANG": "C"})  # no UTF-8, no colours, can't hide its cursor
+    t.until(lambda s: rows(s)[1].startswith("+- 1  local:") and "10quit" in s, "vt100, ASCII")
+    t.keys("\x1bOQ")  # vt100's F2
+    t.until(lambda s: "| open" in s and "+---" in s, "a menu, framed in ASCII")
+    sgr = lambda raw: re.findall(rb"\x1b\[([0-9;]*)m", raw)  # the text attributes sent; colours: 30-48, 90-107
+    colour = lambda a: re.search(rb"(^|;)(3[0-8]|4[0-8]|9[0-7]|10[0-7])(;|$)", a)  # (39, 49: the terminal's own)
+    assert all(b < 128 for b in b"".join(t.raw)) and not any(colour(a) for a in sgr(b"".join(t.raw)))
+    t.keys("Esc")
+    assert t.quit() == 0
+    t = Term([], B, env={"TERM": "xterm-256color"})  # 256 colours: every theme; the pick saved
+    t.keys("t")
+    t.until(lambda s: "─ theme " in s and "matrix" in s and "ember" in s, "every theme, 256 colours")
+    t.keys("j", "\r")
+    t.until(lambda s: "theme: matrix" in s, "a 256-colour theme")
+    assert 'theme = "matrix"' in (T / "rshm.toml").read_text() and t.quit() == 0
+    t = Term([], B, env={"TERM": "xterm"})  # back on 8 colours: the default theme shown, said once, the choice kept
+    t.until(lambda s: "theme matrix: this terminal shows 8 colours; default instead" in s, "a theme this terminal can't show")
+    assert 'theme = "matrix"' in (T / "rshm.toml").read_text() and t.quit() == 0
+    t = Term([], B, env={"TERM": "xterm-kitty"})  # no terminfo for it here: drawn as xterm-256color, said in the log
+    t.until(lambda s: "TERM=xterm-kitty is unknown here: drawn as xterm-256color" in s and "10quit" in s, "TERM unknown")
+    assert t.quit() == 0
+    t = Term([], B, env={"TERM": "xterm-256color", "NO_COLOR": "1"})  # no colours, bold and reverse kept
+    t.until(lambda s: "NO_COLOR is set" in s and "10quit" in s, "NO_COLOR")
+    assert not any(colour(a) for a in sgr(b"".join(t.raw))) and any(sgr(b"".join(t.raw)))
+    assert t.quit() == 0
+    t = Term([], B, env={"TERM": "dumb"})  # can't place its cursor: refused, plainly, nothing drawn
+    out = b""
+    with contextlib.suppress(OSError):  # (read to its end: the terminal closes when rshm leaves)
+        while b := os.read(t.fd, 65536):
+            out += b
+    assert out.strip() == b"rshm needs a terminal that can move its cursor; TERM=dumb can't", out
+    assert os.waitpid(t.pid, 0)[1] != 0
+    r = subprocess.run([*os.environ.get("RSHM_RUN", sys.executable).split(), T / "rshm.pyz"], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True)
+    assert r.returncode == 1 and r.stderr == "rshm needs a terminal\n", r  # not a terminal at all
 
     # --- 2. hosts, through a throwaway sshd ---
     sshd = shutil.which("sshd") or next((p for p in ("/usr/sbin/sshd", "/usr/local/sbin/sshd") if os.path.exists(p)), None)
