@@ -1,14 +1,14 @@
 """The screen, mc's way: a menu bar, two panes (each a folder here or on a host, or the host list), the activity log,
 the F-key bar. Every action is one row of KEYS: keys, menu, F-key bar, F1 and --help all come from there."""
 import atexit, contextlib, curses, fnmatch, grp, math, os, posixpath, pwd, shlex, shutil, signal, socket, stat
-import subprocess, sys, tempfile, time, tomllib
+import subprocess, sys, tempfile, time
 from collections import deque
 
 from . import config, edit as editor, view as viewer
 from .fs import (ARCHIVES, PART, Archive, Local, Remote, complete, copy, folder, isdir, islink, join, kind, look, marker,
                  names, peek, rm, save, special, walk)
 from .screen import (CLICK, MOVES, RIGHT, WHEEL_DOWN, WHEEL_UP, bar, cells, cursor, dur, fit, human, line, plain,
-                     readline, safe, window)
+                     readline, safe, span, window)
 from .ssh import argv, connect, quiet, unreachable
 
 ROLES = ("norm", "sel", "acc", "dim", "err", "bar", "dir", "exe", "link", "stale", "archive", "media", "special",
@@ -59,18 +59,18 @@ KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under bo
     ("File", "H", "hard link to it", "hardlink"),
     ("File", "z", "size", "size"),
     ("Mark", "Space Ins", "mark", "mark"), ("Mark", "*", "all / none", "markall"),
-    ("Mark", "+", "mark names like…", "markpat"), ("Mark", "-", "unmark names like…", "unmarkpat"),
+    ("Mark", "+", "mark by pattern (*.log)", "markpat"), ("Mark", "-", "unmark by pattern", "unmarkpat"),
     ("Mark", "D", "differences from the other pane", "compare"),
     ("Pane", "@", "host list", "hostlist"), ("Pane", "Tab", "other pane", "tab"), ("Pane", "/", "filter", "search"),
-    ("Pane", "S", "sort by…", "sort"), ("Pane", ".", "dotfiles: show / hide", "dotfiles"),
+    ("Pane", "S", "sort: name, extension, size, date", "sort"), ("Pane", ".", "dotfiles: show / hide", "dotfiles"),
     ("Pane", "b", "back", "back"), ("Pane", "f", "forward", "forward"), ("Pane", "g", "go to path", "goto"),
-    ("Pane", "~", "home", "home"), ("Pane", "^F", "find names like…", "find"), ("Pane", "o", "other pane here", "mirror"),
+    ("Pane", "~", "home", "home"), ("Pane", "^F", "find by name, below here", "find"), ("Pane", "o", "other pane here", "mirror"),
     ("Pane", "^U", "swap panes", "swap"), ("Pane", "r ^R", "reload", "reload"),
     ("Pane", "Esc", "back: filter, marks, find, host list", "esc"),
     ("Command", "F2", "menu: what can be done here", "menu"), ("Command", "^O s", "shell here", "shell"),
     ("Command", "p", "live check of the host", "ping"),
     ("Options", "F9", "bar: the menus up top", "menubar"), ("Options", "t", "theme: pick one", "theme"),
-    ("Options", "[ ]", "log: older / newer", "logscroll"), ("Options", "", "edit config", "editcfg"),
+    ("Options", "[ ]", "log: older / newer", "logscroll"), ("Options", "", "edit config (F4 on the host list)", "editcfg"),
     ("Options", "^L", "draw the screen again", "draw"), ("Options", "F1 ?", "help: all keys", "help"),
     ("Options", "F10 q", "quit", "quit"),
     (None, "↑ ↓ j k PgUp PgDn Home End", "move", None), (None, "click · again", "select · open", None),
@@ -86,8 +86,14 @@ SHELL = 'exec "${SHELL:-sh}" -l'
 MIN_W, MIN_H, PANE_W, PANE_H = 20, 7, 24, 4  # the whole screen, and one pane (title row included), at the least
 
 
+def grouped():  # KEYS by menu, as the bar orders them, the rest last: [(heading, [rows])]
+    return [(m or "moving, mouse", [r for r in KEYS if r[0] == m]) for m in ("File", "Mark", "Pane", "Command", "Options", None)]
+
+
 def keys_help():  # `rshm --help` shows the same table the app runs on, as the terminal shows it
-    return plain("\n".join(f"  {k:<26} {w}" for _, k, w, _ in KEYS))
+    w = max(len(k) for _, k, _, _ in KEYS) + 2
+    return plain("keys:" + "".join(f"\n {g}\n" + "\n".join(f"   {k:<{w}}{what}" for _, k, what, _ in rows)
+                                   for g, rows in grouped()))
 
 
 def codes(keys):  # "x Del" -> every keycode it stands for
@@ -202,20 +208,22 @@ class App:
             raise OSError("pick a host first: Enter on it")
         return s.P
 
-    def load(s):
+    def load(s):  # the config (a broken one: what it had, at the start nothing) and ~/.ssh/config's hosts with it
         try:
             c = config.read(s.cfg)
-            old = {h["host"]: h for *_, h, _ in config.flat(s.hosts, set()) if h}
-            s.c, s.hosts, s.cmds = c, config.hosts(c), config.table(c, "commands")
-            new = {h["host"]: h for *_, h, _ in config.flat(s.hosts, set()) if h}
-            for k, h in new.items():  # a host keeps its last folder, a pane its host, through a reload
-                if k in old and "_cwd" in old[k]:
-                    h["_cwd"] = old[k]["_cwd"]
-            for p in s.panes:
-                p.host = new.get(p.host["host"], p.host) if p.host and p.host is not LOCAL else p.host
-            s.theme_name = str(c.get("theme", s.theme_name))
-        except (OSError, tomllib.TOMLDecodeError) as e:
-            s.msg = f"✗ config: {e}"
+            if config.unread(s.cfg):
+                s.msg = f"{config.unread(s.cfg)}: built-ins and ~/.ssh/config's hosts"
+        except OSError as e:
+            c, s.msg = s.c, f"✗ config: {e}"
+        old = {h["host"]: h for *_, h, _ in config.flat(s.hosts, set()) if h}
+        s.c, s.hosts, s.cmds = c, config.hosts(c), config.table(c, "commands")
+        new = {h["host"]: h for *_, h, _ in config.flat(s.hosts, set()) if h}
+        for k, h in new.items():  # a host keeps its last folder, a pane its host, through a reload
+            if k in old and "_cwd" in old[k]:
+                h["_cwd"] = old[k]["_cwd"]
+        for p in s.panes:
+            p.host = new.get(p.host["host"], p.host) if p.host and p.host is not LOCAL else p.host
+        s.theme_name = str(c.get("theme", s.theme_name))
         s.set_theme(s.theme_name)
         for p in s.panes:
             s.sync(p)
@@ -1007,10 +1015,11 @@ class App:
         d = d if d is not None else -1 if s.key_hit == ord("]") else 1
         s.logoff = max(0, min(len(s.log) - 1, s.logoff + d))
 
-    def help(s, y=None, x=None):  # every key; ⏎ runs the chosen one
-        i = s.choose([(w, k) for _, k, w, _ in KEYS], y, x, title="keys")
-        if isinstance(i, int) and KEYS[i][3]:
-            s.act(getattr(s, KEYS[i][3]))
+    def help(s, y=None, x=None):  # every key, by menu; ⏎ runs the chosen one
+        rows = [r for g, rs in grouped() for r in [(None, None, g, None), *rs]]
+        i = s.choose([(w, k) for _, k, w, _ in rows], y, x, title="keys")
+        if isinstance(i, int) and rows[i][3]:
+            s.act(getattr(s, rows[i][3]))
 
     def menubar(s, i=0):  # F9, or a tap on the bar: one menu open at a time, lit in the bar; ←→ to the next,
         try:              # ↑↓ ⏎ in it; Esc, or a tap anywhere else, closes it
@@ -1060,7 +1069,7 @@ class App:
         s.paint()  # one overlay over a fresh screen each time, placed for the size it has now: no leftovers
         s.scr.noutrefresh()  # -> (win, y, x, w, h, off)
         H, W = s.scr.getmaxyx()
-        w = min(max(max(cells(l) + cells(k) for l, k in items) + 6, cells(title) + 6), W)
+        w = min(max(max(cells(l) + cells(k or "") for l, k in items) + 6, cells(title) + 6), W)
         h = min(len(items) + 2, H)
         y, x = max(0, min(y0, H - h)), max(0, min(x0, W - w))
         win = window(curses.newwin(h, w, y, x))
@@ -1073,9 +1082,13 @@ class App:
             if title:
                 win.addstr(0, 2, f" {title} ", s.C["acc"] | curses.A_BOLD)
             for r, (l, k) in enumerate(items[off:off + h - 2]):
-                win.addstr(r + 1, 0, "│", s.C["acc"])
-                win.addstr(r + 1, 1, bar(f" {l}", f"{k} ", w - 1), s.C["sel" if r + off == i else "norm"])
-                win.addstr(r + 1, w - 1, "│", s.C["acc"])
+                if k is None:  # a heading: a divider through the frame, with its name
+                    win.addstr(r + 1, 0, "├" + span(f"─ {l} " + "─" * w, 0, w - 2) + "┤",
+                               s.C["acc"] | curses.A_REVERSE * (r + off == i))
+                else:
+                    win.addstr(r + 1, 0, "│", s.C["acc"])
+                    win.addstr(r + 1, 1, bar(f" {l}", f"{k} ", w - 1), s.C["sel" if r + off == i else "norm"])
+                    win.addstr(r + 1, w - 1, "│", s.C["acc"])
             win.addstr(h - 1, 0, "└" + "─" * (w - 2), s.C["acc"])
             win.insstr(h - 1, w - 1, "┘", s.C["acc"])  # the very last cell: written without moving past it
         win.noutrefresh()

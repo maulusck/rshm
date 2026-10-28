@@ -1,5 +1,5 @@
 """rshm [HOST [HOST]]: one host opens in the right pane (this machine on the left), two side by side."""
-import argparse, atexit, curses, importlib.resources, os, signal, sys, tomllib, zipfile
+import argparse, atexit, curses, importlib.resources, os, signal, sys, zipfile
 from pathlib import Path
 
 from . import __version__, config
@@ -15,7 +15,7 @@ def pyz(out):  # this very rshm as one runnable file, from wherever it runs (sou
             for r in sorted(importlib.resources.files(__package__).iterdir(), key=lambda r: r.name):
                 if r.name.endswith(".py"):
                     z.writestr(f"rshm/{r.name}", r.read_bytes())
-            z.writestr("__main__.py", "import sys\nif sys.version_info < (3, 11):\n    sys.exit('rshm needs Python 3.11 or "
+            z.writestr("__main__.py", "import sys\nif sys.version_info < (3, 9):\n    sys.exit('rshm needs Python 3.9 or "
                                       "newer')\nfrom rshm.__main__ import main\nmain()\n")
     tmp.chmod(0o755)
     os.replace(tmp, out)
@@ -54,13 +54,15 @@ def main():
     cfg = a.config.expanduser() if a.config else config.locate()
     if a.config and not cfg.exists():
         ap.error(f"{cfg}: no such file")
+    if a.config and config.unread(cfg):
+        ap.error(config.unread(cfg))
     if len(a.host) > 2:
         ap.error("two panes: at most two hosts")
     start = []
     if a.host:  # resolved before the screen opens, so a typo is a plain error
         try:
             hs = config.hosts(config.read(cfg))
-        except (OSError, tomllib.TOMLDecodeError) as e:
+        except OSError as e:
             ap.error(f"{cfg}: {e}")
         for name in a.host:
             m = config.find(hs, name)

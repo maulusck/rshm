@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """Offline check of everything but the screen and ssh itself. Copies run against a real sftp-server (the binary
 OpenSSH runs server-side), talked to directly: no network, no sshd."""
-import curses, io, os, pwd, re, shutil, signal, subprocess, sys, tarfile, tempfile, time, tomllib, types, zipfile
+import curses, io, os, pwd, re, shutil, signal, subprocess, sys, tarfile, tempfile, time, types, zipfile
 from pathlib import Path
 
 from rshm import config, edit, fs, screen, sftp, ssh, ui, view
 
+tomllib = config.tomllib  # None before Python 3.11: the config's checks then are that it's left unread, plainly
+
 screen.ASCII = False  # these checks are of a UTF-8 terminal, whatever this machine's locale; ASCII has its own below
 
 # config: a host is an ssh destination; a table is a group; a list is a group of destinations named as themselves
-h = config.tree(tomllib.loads("""
-[hosts]
-solo = "me@solo"
-lab = ["pi", "box"]
-[hosts.prod]
-web = "deploy@web.example.com"
-db = { host = "db", path = "/srv/db" }
-""")["hosts"])
-sample = tomllib.loads(config.SAMPLE)
-assert set(sample) == {"theme", "include", "tools", "open", "commands", "hosts"} and config.tool(sample, "edit") is None
-full = tomllib.loads(re.sub(r"^# ", "", config.SAMPLE, flags=re.M))  # every example in it, switched on, is right
-assert config.tree(full["hosts"]) == {"work": {"host": "work"}, "pi": {"host": "me@pi", "path": "/srv"},
-                                      "lab": {"box": {"host": "box"}, "nas": {"host": "nas"}},
-                                      "prod": {"web": {"host": "deploy@web.example.com"}}}
-assert config.opener(full, "a.DJVU") and "{names}" in config.table(full, "commands")["disk usage"]
+h = config.tree({"solo": "me@solo", "lab": ["pi", "box"],
+                 "prod": {"web": "deploy@web.example.com", "db": {"host": "db", "path": "/srv/db"}}})
+if tomllib:
+    sample = tomllib.loads(config.SAMPLE)
+    assert set(sample) == {"theme", "include", "tools", "open", "commands", "hosts"} and config.tool(sample, "edit") is None
+    full = tomllib.loads(re.sub(r"^# ", "", config.SAMPLE, flags=re.M))  # every example in it, switched on, is right
+    assert config.tree(full["hosts"]) == {"work": {"host": "work"}, "pi": {"host": "me@pi", "path": "/srv"},
+                                          "lab": {"box": {"host": "box"}, "nas": {"host": "nas"}},
+                                          "prod": {"web": {"host": "deploy@web.example.com"}}}
+    assert config.opener(full, "a.DJVU") and "{names}" in config.table(full, "commands")["disk usage"]
 assert config.SAMPLE in (Path(__file__).parent / "README.md").read_text()  # the README shows it, word for word
 assert config.table({"commands": {"a": "x", "b": 3}}, "commands") == {"a": "x"} and config.table({"commands": "j"}, "commands") == {}
 
@@ -85,7 +82,17 @@ assert (d / "new" / "rshm.toml").read_text() == config.SAMPLE and (d / "new" / "
 (d / "gen.toml").write_text('[hosts]\ns1 = ["nmt-s1", "it-s1"]\nmine = "theirs"\n')  # include: generated hosts join
 (d / "inc.toml").write_text('include = ["gen.toml"]\n[tools]\nedit = "nvim"\n[hosts]\nmine = "me"\n')
 inc = config.read(d / "inc.toml")
-assert inc["hosts"] == {"s1": ["nmt-s1", "it-s1"], "mine": "me"} and inc["tools"] == {"edit": "nvim"}
+if tomllib:
+    assert inc["hosts"] == {"s1": ["nmt-s1", "it-s1"], "mine": "me"} and inc["tools"] == {"edit": "nvim"}
+    (d / "bad.toml").write_text("[hosts\n")  # broken: said plainly, as an OSError like any other
+    try:
+        config.read(d / "bad.toml")
+        raise AssertionError("broken TOML read")
+    except OSError as e:
+        assert str(e).startswith("bad.toml: ") and config.unread(d / "bad.toml") == ""
+else:  # no TOML here: the config is left unread, and said why; no config at all says nothing
+    assert inc == {} and config.unread(d / "inc.toml").startswith("inc.toml is read from Python 3.11 on (this is 3.")
+assert config.unread(d / "none.toml") == ""
 os.environ["XDG_CONFIG_HOME"] = str(d)
 assert config.locate() == d / "rshm.toml"
 del os.environ["XDG_CONFIG_HOME"]
@@ -105,7 +112,8 @@ finally:
     os.replace = replace
 for src in ('theme = "amber"   # c\n[hosts]', "theme='amber' # c\n[hosts]", "[hosts]"):  # only the value changes
     out = config.retheme(src, "matrix")
-    assert tomllib.loads(out)["theme"] == "matrix" and out.count("theme") == 1 and ("# c" in out) == ("# c" in src)
+    assert out.count("theme") == 1 and ("# c" in out) == ("# c" in src)
+    assert re.search(r'^theme\s*=\s*"matrix"', out, re.M) and (not tomllib or tomllib.loads(out)["theme"] == "matrix")
 
 # ssh config import: aliases (several per line, key=value, quotes), Includes (relative, glob, cycles), no patterns
 (d / "conf.d").mkdir()
@@ -147,6 +155,8 @@ assert [f"F{n} {w}" for n, w, _ in ui.fkeys()] == ["F1 help", "F2 menu", "F3 vie
                                                   "F7 mkdir", "F8 delete", "F9 bar", "F10 quit"]  # mc's ten, mc's order
 assert all(ui.menu_rows(m) for m in ui.MENUS) and {r[0] for r in ui.KEYS} - {None} == {"Pane", "File", "Mark", "Command", "Options"}
 assert ui.menu_rows("Pane 1") == ui.menu_rows("Pane 2") and "copy to the other pane" in ui.keys_help()
+assert [g for g, _ in ui.grouped()] == ["File", "Mark", "Pane", "Command", "Options", "moving, mouse"]  # help, by menu
+assert sum(len(rows) for _, rows in ui.grouped()) == len(ui.KEYS) and "\n Mark\n   Space Ins" in ui.keys_help()
 assert all(len(th) == len(ui.ROLES) and all(-1 <= c < 256 for x in th for c in x[:2]) for th in ui.THEMES.values())
 
 # a terminal that isn't UTF-8: told by its locale (the first of LC_ALL, LC_CTYPE, LANG set), not by what Python makes
@@ -654,16 +664,19 @@ def run(*args, wrapper=None):  # rshm ARGS in this process -> (exit code, stderr
 
 cfg = d / "c.toml"
 cfg.write_text('[hosts]\nweb = "w"\nweb2 = "w2"\n')
-assert "no such file" in run("-c", str(d / "none.toml"))[1] and "at most two hosts" in run("-c", str(cfg), "a", "b", "c")[1]
-assert "ambiguous host 'we': web, web2" in run("-c", str(cfg), "we")[1] and "no host 'zz'" in run("-c", str(cfg), "zz")[1]
-assert run("-c", str(cfg), "web")[0] == 0 and run("-c", str(cfg), "web", "web2")[0] == 0
-(d / "bad.toml").write_text("[hosts\n")
-assert "bad.toml" in run("-c", str(d / "bad.toml"), "x")[1]
+assert "no such file" in run("-c", str(d / "none.toml"))[1] and "at most two hosts" in run("a", "b", "c")[1]
+if tomllib:
+    assert "ambiguous host 'we': web, web2" in run("-c", str(cfg), "we")[1] and "no host 'zz'" in run("-c", str(cfg), "zz")[1]
+    assert run("-c", str(cfg), "web")[0] == 0 and run("-c", str(cfg), "web", "web2")[0] == 0
+    (d / "bad.toml").write_text("[hosts\n")
+    assert "bad.toml" in run("-c", str(d / "bad.toml"), "x")[1]
+else:  # a config asked for by name, on a Python that can't read it: refused, saying why
+    assert "c.toml is read from Python 3.11 on" in run("-c", str(cfg), "web")[1]
 assert run(wrapper=lambda f: (_ for _ in ()).throw(KeyboardInterrupt))[0] == 0  # ^C at the very end: a quiet exit
 assert "needs a terminal" in run(wrapper=lambda f: (_ for _ in ()).throw(curses.error("setupterm")))[1]
 assert run("--pyz", str(d / "r.pyz"))[0] == 0 and os.access(d / "r.pyz", os.X_OK)
 with zipfile.ZipFile(d / "r.pyz") as zf:
-    assert {"__main__.py", "rshm/ui.py", "rshm/fs.py"} <= set(zf.namelist()) and b"3, 11" in zf.read("__main__.py")
+    assert {"__main__.py", "rshm/ui.py", "rshm/fs.py"} <= set(zf.namelist()) and b"3, 9" in zf.read("__main__.py")
 with contextlib.suppress(SystemExit), contextlib.redirect_stdout(io.StringIO()):
     sys.argv = ["rshm", "-V"]
     sys.modules.pop("rshm.__main__")  # run as python -m rshm runs it

@@ -1,7 +1,7 @@
 # rshm
 
 Remote SHell Manager: a two-pane file manager, Midnight Commander style, for this machine and every host in your
-`~/.ssh/config`. It needs Python 3.11+ and `ssh`, nothing else: viewer, editor and archive browsing are built in.
+`~/.ssh/config`. It needs Python 3.9+ and `ssh`, nothing else: viewer, editor and archive browsing are built in.
 One file on a USB stick runs on any machine as is; your config makes it yours (your hosts sorted, bat, nvim, 7z).
 
 ```sh
@@ -36,7 +36,7 @@ one above the other when the terminal stands upright (a phone, Termux), one at a
 
 ## Keys
 
-`F1` and `rshm --help` list them all, from the one table every key, menu and F-key comes from.
+`F1` and `rshm --help` list them all by menu, from the one table every key, menu and F-key comes from.
 
 | Key | Does |
 |---|---|
@@ -62,7 +62,8 @@ the wheel scrolls panes, the log, menus, viewer and editor. The viewer has less'
 
 ## Config
 
-None needed: without one rshm runs on its built-ins and writes nothing. `F4` on the host list creates it from this
+None needed: without one rshm runs on its built-ins and writes nothing. It is read from Python 3.11 on (TOML); on
+3.9 and 3.10 rshm runs on its built-ins and your `~/.ssh/config` hosts, and says so once. `F4` on the host list creates it from this
 default, which shows every option. It is the first of: `-c FILE`, `rshm.toml` next to `rshm.pyz` (it travels with
 it), `$XDG_CONFIG_HOME/rshm.toml` (`~/.config`).
 
@@ -144,6 +145,7 @@ rshm draws with what the terminal has, and never more:
 | `ui.py` | the screen; `KEYS` is the one table behind keys, menus, F-keys, F1 and `--help`; `THEMES` colour by role |
 | `view.py` `edit.py` `screen.py` | the built-in viewer and editor; text measured and fitted in terminal cells, and drawn as the terminal shows it |
 
+Another key for an action: its row in `KEYS`, then `python3 -m rshm --pyz rshm.pyz`; menus, the F-key bar and help follow.
 A new action: a method on `App` and one row in `KEYS`. A new place to browse: a class with `fs.py`'s primitives.
 
 ## Tests
@@ -155,4 +157,6 @@ A new action: a method on `App` and one row in `KEYS`. A new place to browse: a 
 | `python3 test_app.py` | the whole app in this process on a strict virtual terminal (a write past an edge fails): every branch the screen test doesn't press, then a monkey of random keys, taps and sizes (`RSHM_MONKEY`), on every kind of terminal (UTF-8 or not, 256 colours, 8, none, a cursor it can't hide); jailed to a temp folder, no network |
 | `python3 test_live.py` | the `rshm.pyz` it builds of itself, on a real screen in a terminal: every key, menus and taps, every screen through every size, the layouts as the terminal turns and shrinks; the terminals (vt100 in ASCII, a `TERM` unknown here, `NO_COLOR`, `dumb`, none); then hosts through a throwaway sshd and a jump. Any terminal (`RSHM_TERM=screen` …: keys from its terminfo). As you, in a temp folder removed afterwards (needs `pyte`; the host part needs `sshd`) |
 
-Together they run every line of rshm (measured with the stdlib `trace`, the screen child included), on Python 3.11 to 3.13.
+Together they run every line of rshm (measured with the stdlib `trace`, the screen child included), on Python 3.11 to
+3.13. On 3.9 and 3.10 they run all that doesn't need the config: the logic, the stress proof, the app without its
+config's parts, and the screen test's terminals plus a walk through this machine.

@@ -1,6 +1,11 @@
 """rshm's own config and the hosts it shows: its tree plus every ~/.ssh/config alias. All of it optional:
 with no config rshm runs on its built-ins and writes nothing."""
-import fnmatch, glob, os, re, shlex, tomllib
+import fnmatch, glob, os, re, shlex, sys
+
+try:
+    import tomllib
+except ImportError:  # Python 3.9, 3.10: no TOML in the stdlib. The config waits for 3.11; the rest runs as is
+    tomllib = None
 from pathlib import Path
 
 SSH_CONFIG = Path.home() / ".ssh" / "config"
@@ -36,12 +41,23 @@ def locate():  # rshm.toml next to rshm.pyz (it travels with it), else $XDG_CONF
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "rshm.toml"
 
 
-def read(cfg):  # the config; none at all is fine. include: more files (beside it) whose [hosts] join its own
-    c = tomllib.loads(cfg.read_text()) if cfg.exists() else {}
-    for f in c.get("include") if isinstance(c.get("include"), list) else ():
-        more = tomllib.loads((cfg.parent / Path(f).expanduser()).read_text()).get("hosts")
-        if isinstance(more, dict) and isinstance(c.get("hosts", {}), dict):
-            c["hosts"] = {**more, **c.get("hosts", {})}  # a name in both: yours wins
+def unread(cfg):  # why the config isn't read ("" when it is): a Python without TOML
+    if cfg.exists() and not tomllib:
+        return f"{cfg.name} is read from Python 3.11 on (this is {sys.version.split()[0]})"
+    return ""
+
+
+def read(cfg):  # the config; none at all is fine (nor unread). include: more files (beside it) whose [hosts] join its own
+    if not cfg.exists() or unread(cfg):
+        return {}
+    try:
+        c = tomllib.loads(cfg.read_text())
+        for f in c.get("include") if isinstance(c.get("include"), list) else ():
+            more = tomllib.loads((cfg.parent / Path(f).expanduser()).read_text()).get("hosts")
+            if isinstance(more, dict) and isinstance(c.get("hosts", {}), dict):
+                c["hosts"] = {**more, **c.get("hosts", {})}  # a name in both: yours wins
+    except tomllib.TOMLDecodeError as e:
+        raise OSError(f"{cfg.name}: {e}") from None
     return c
 
 

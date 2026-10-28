@@ -9,7 +9,7 @@ BOX = Path(tempfile.mkdtemp(prefix="rshm-app-")).resolve()
 os.environ["HOME"] = str(BOX)  # rshm's config, ssh's config and the login sockets: all in the sandbox
 for v in ("EDITOR", "VISUAL", "PAGER", "XDG_CONFIG_HOME"):
     os.environ.pop(v, None)
-from rshm import edit, fs, screen, ui, view  # noqa: E402  (after HOME is set)
+from rshm import config, edit, fs, screen, ui, view  # noqa: E402  (after HOME is set)
 from rshm.screen import cell, cells  # noqa: E402
 
 screen.ASCII = False  # a UTF-8 terminal, whatever this machine's locale; the monkey also runs the ASCII one
@@ -266,231 +266,232 @@ SCR = VT(10, 40)
 SCR.keys.extend(["G", "x", "G", "q"])
 view.view(SCR, b"", "empty", ui.MONO)
 
-# --- the app: what the pty test doesn't press, each checked ---
-os.chdir(W)
-app = start()
-assert "1  local:" in SCR.text() and "a.txt" in SCR.text(), SCR.text()
-more(app, "@", K.DOWN, (2, 5, CLICK))  # a tap on a host only selects it (a login is never one stray tap away)
-assert app.P.mode == "hosts" and app.P.cur()[2] is ui.LOCAL
-more(app, (2, 5, CLICK))  # the second opens it
-assert app.P.mode == "files"
-more(app, "g", "\x15", *"su", "\t", "\n")  # go to: Tab completes in the pane's own folder
-assert app.P.cwd == str(W / "sub")
-more(app, "h")
-more(app, "/", *"zz", "\x1b")  # Esc in the filter: no filter
-assert app.P.files.flt == "" and len(app.P.files.rows) > 1
-more(app, "@", K.F5)  # on the host list, a file action asks for a host
-assert "pick a host first" in log(app)
-more(app, "\x1b", "f")  # history: nothing further
-assert "no further" in log(app)
-more(app, "@", "/", *"zzzz", "\n", "\n", "\x1b", "\x1b")  # ⏎ on an empty filtered list: nothing
-more(app, "/", *"a.t", K.DOWN, K.UP, K.BACKSPACE, "\x00", "\n")  # the filter: arrows move, ⌫ edits
-assert app.P.files.flt == "a." and app.P.cur()[0] == "a.txt"
-more(app, "\x1b", "\x06", "\x15", "\n")  # ^F with no pattern: nothing
-more(app, "\x06", "\n")  # ^F *: everything below, found
-assert app.P.found == "*" and any(n == "sub" for n, _ in app.P.items)
-assert "Esc goes back" in log(app)
-more(app, "\x1b", "D")  # Esc: out of find results, back in the folder  # the other pane shows hosts: nothing to compare with
-assert "the other pane shows no folder" in log(app)
-more(app, K.DOWN, "c")
-assert "the other pane shows no folder: pick one" in log(app)
-assert not app.P.found
-more(app, "/z.zip", "\n", "\n", "o")  # inside an archive: no mirror; F6 refused; @ and a host leaves it
-assert "not from inside an archive" in log(app)
-more(app, "\t", "\n", "\t", K.DOWN, K.F6)
-assert "an archive is read-only" in log(app)
-more(app, "@", K.HOME, "\n")
-assert not app.P.up and "local:" in SCR.text()
-more(app, "@", K.DOWN, "\n", K.DOWN, "h", "h", "\n", "s", "p", K.DOWN, "s", "p")  # ← in a group: to it; ^O, p
-assert log(app).count("no network") == 2
-more(app, "\n")  # opening a host that can't be reached: the pane stays as it was
-assert "no network" in log(app) and app.P.mode == "hosts"
-more(app, "\x1b", "\x1b")
-assert app.P.mode == "files"
-more(app, "\x1b", "/a.txt", "\n", "c", "\x15", "/", "\n")  # copy onto a folder you can't write: the jail says no
-assert "jail" in log(app) or "Permission" in log(app)
-more(app, "c", "\x15", str(W), "\n")  # onto itself
-assert "already is" in log(app)
-more(app, "c", "\x15", str(W / "bin.dat"), "\n")
-assert "bin.dat: not a folder" in log(app)
-more(app, "c", "\x15", str(W / "nope" / "x"), "\n")
-assert "No such file" in log(app)
-(W / "sub" / "a.txt").write_text("other")
-more(app, "c", "\x15", str(W / "sub"), "\n", "n")  # a clash, and no: nothing
-assert (W / "sub" / "a.txt").read_text() == "other"
-more(app, "c", "\x15", "\n")  # an empty answer: nothing
-more(app, "A", "\x15", *"zz", "\n")  # A: a form, one row per attribute; only the rows you change are applied
-assert "mode zz: not like 6" in log(app)
-more(app, "A", K.DOWN, "\x15", *"nobody:nogroup", "\n")
-assert "✓ owner nobody:nogroup" in log(app) and (W / "a.txt").stat().st_uid != 0
-mode = (W / "a.txt").stat().st_mode
-more(app, "A", K.DOWN, "\x15", *"99999999:0", "\n", "A", K.DOWN, "\x15", *":root", "\n", "A", "\t", "\x15", *"nouser_x:", "\n")
-assert "nouser_x: no user by that name here" in log(app) and (W / "a.txt").stat().st_mode == mode
-more(app, "A", K.UP, "\x15", *"2001-09-09 01:46", K.UP, K.UP, "\x15", *"600", K.DOWN, K.DOWN, "\n")  # ↑ wraps round
-assert (W / "a.txt").stat().st_mode & 0o777 == 0o600 and time.localtime((W / "a.txt").stat().st_mtime)[:5] == (2001, 9, 9, 1, 46)
-more(app, "A", K.LEFT, K.LEFT, "\x7f", "0", K.HOME, "\x05", K.RIGHT, K.DC, "\x1b")  # the line edits in place; Esc: nothing
-assert (W / "a.txt").stat().st_mode & 0o777 == 0o600
-more(app, "R", "\x15", "\n", "L", "\x15", "\n", "H", "\x15", "\n", "z")  # empty answers: nothing
-more(app, "/bin", "\n", K.F3, "q", K.F4, "\x18")  # binary opens as hex; edited as is
-RAN.clear()
-more(app, "/a.txt", "\n", K.F2, K.END, "\n")  # F2: what can be done here, then your [commands]
-assert RAN and RAN[-1][0][-1].startswith("ls a.txt;"), RAN
-CFG.write_text("theme = [\n")  # a broken config: said, the app goes on with what it had
-more(app, "r")
-assert "config:" in log(app)
-CFG.write_text('theme = "amber"\n[tools]\nedit = "true"\nview = "true"\n')
-more(app, "r", "@", K.F4, "\x1b", "e")  # your editor for the config; for a file: your tools
-assert any("true" in str(c) for c, _ in RAN)
-more(app, "\x1b", "/a.txt", "\n", "v", "e", "\n")
-CFG.write_text("")
-more(app, "r", "[", "]", (29, 5, UP), (29, 5, DOWN), (10, 1, RIGHT), "\x1b", (25, 100, RIGHT), "\x1b", (5, 3, DOWN),
-     (5, 70, CLICK), (5, 70, CLICK), "\x1b", (0, 2, CLICK), K.RIGHT, (0, 30, CLICK), (0, 0, CLICK), (14, 60, CLICK),
-     "\x1b", (1, 70, RIGHT), "\x1b", (29, 2, CLICK), "\x1b", (0, 119, CLICK), K.MOUSE, "?", K.DOWN, "\n", "\x1b")
-more(app, K.F9, K.LEFT, "\n")  # a menu item in Pane 2's menu acts on pane 2
-assert app.focus == 1
-more(app, K.F9, (20, 100, CLICK), K.F9, K.DOWN, K.DOWN, K.NPAGE, K.PPAGE, (1, 2, UP), (1, 2, DOWN), K.END, "\x1b")
-(W / "lnd").symlink_to("sub")  # onto a link to a folder: into the folder
-for i in (0, 1):  # both panes here, the first one focused
-    app.act(app.open_host, app.panes[i], ui.LOCAL, str(W))
-app.focus = 0
-more(app, "/bin.dat", "\n", "c", "\x15", str(W / "lnd"), "\n")
-assert (W / "sub" / "bin.dat").exists()
-more(app, "\x1b", "/a.txt", "\n", "L", "\x15", *str(W / "sub" / "ln"), "\n")  # L: one question, where; relative
-assert os.readlink(W / "sub" / "ln") == "../a.txt" and (W / "sub" / "ln").read_text() == (W / "a.txt").read_text()
-more(app, "L", "\n")  # the default: the other pane's folder (here the same), the same name: taken
-assert "File exists" in log(app).split("\n")[-1]
-more(app, "H", "\x15", *"sub/hl", "\n")  # H: another name; relative to this folder
-assert (W / "sub" / "hl").stat().st_ino == (W / "a.txt").stat().st_ino and "another name for a.txt" in log(app)
-more(app, "\x1b", "/sub", "\n", "\n", "/ln", "\n", "L", "\x15", *"hl", "\n", "h", "\x1b")  # L on a link: retarget
-assert os.readlink(W / "sub" / "ln") == "hl"
-more(app, "\x1b", K.HOME, "L", "H", "A")  # on ..: nothing
-more(app, "/bin.dat", "\n", K.F2, K.END, "\n", "\x1b")  # F2, no [commands]: the file actions only; the last is z
-assert log(app).split("\n")[-1].endswith("bin.dat: 5.0K in 1 files")
-ui.connect = lambda *a, **k: None  # a host that's logged in but doesn't answer
-CFG.write_text('[hosts]\ng = ["nohost"]\n')
-more(app, "r", "@", "/nohost", "\n", "p", "\x1b", "\x1b", "/", ("err",), "x", "\n", "\x1b")
-assert "nohost: ssh: no network" in log(app)
-ui.connect = lambda *a, **k: (_ for _ in ()).throw(ConnectionError("nohost: Permission denied (publickey)."))
-more(app, "@", "/nohost", "\n", "p", "\x1b", "\x1b")  # p never asks for a login: it says one is wanted
-assert "nohost answers, but wants a login" in log(app)
-ui.connect = offline
-more(app, "@", "/nohost", "\n", "p", "\x1b", "\x1b")
-assert "nohost unreachable: ssh: no network" in log(app)
-os.chdir(BOX)
-(W / "sub" / "many").mkdir()
-for i in range(120):
-    (W / "sub" / "many" / str(i)).touch()
-more(app, "\x1b", "\t", ("kick", 2), "\x06", "\n")  # ^C mid-find: what was found so far
-assert "find stopped" in log(app)
-more(app, "\x1b", "/sub", "\n", ("kick", 1), "z")  # ^C mid-action: just that action
-assert "✗ stopped" in log(app)
-more(app, "\x0c")  # ^L: the whole screen drawn again
-assert "10quit" in SCR.text() and "1  local:" in SCR.text()
-app.busy("a long one")  # the spinner turns by itself while a call blocks (its timer's tick, run here by hand)
-spun = app.spun
-app.spin()
-assert app.spun == spun + 1 and "a long one" in SCR.text()
-app.drawing = True  # never mid-frame
-app.spin()
-assert app.spun == spun + 1
-app.drawing = False
-app.idle()
-more(app, "r", ("poll", 27))  # Esc while it runs: stopped there
-assert log(app).endswith("✗ stopped")
-more(app, K.END, "r", ("poll", ord("k")))  # anything else typed meanwhile: done after
-assert app.P.files.sel == len(app.P.files.rows) - 2
-more(app, "\x1b", "\x1b", "/sub", "\n", K.F8, "^C", "g", "^C")  # ^C at a question: no
-assert (W / "sub").exists()
-app.cleanup()
-
-# --- a host (a real sftp-server, no jail: scripted keys only): view, your tools, an edit sent back, archives ---
-SRV = next((x for x in ("/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server", "/usr/libexec/sftp-server")
-            if os.path.exists(x)), None)
-if SRV:
-    from rshm import sftp  # noqa: E402
-    sftp.argv = lambda h, batch=False, timeout=8: ["sh", "-c", f"exec {SRV}"]
-    fs.connect = lambda h, *a: None
-    (W / "rsub").mkdir()
-    (W / "rsub" / "f").write_text("f")
-    (W / "bad.zip").write_bytes(b"junk")
-    (W / "huge").touch()
-    os.truncate(W / "huge", 3 * ui.HEAD)  # 3 MB of zeros: binary
-    CFG.write_text(f'[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
-    app = start("@", "/srv", "\n", "\n", "/a.txt", "\n", K.F3, "q")
-    assert app.P.fs.name == "srv" and app.P.cwd == str(W)
-    CFG.write_text(f'[tools]\nview = "true"\nedit = "printf x >>"\n[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
-    REAL.append("printf x >>")
-    more(app, "r", "v", "e")  # your viewer gets a private copy; your editor's change goes back
-    assert "✓ saved a.txt" in log(app) and (W / "a.txt").read_text().endswith("x")
-    RAN.clear()  # binary, with a viewer set: never to it; rshm's hex view of the first MB; not edited
-    more(app, "\x1b", "/huge", "\n", "v")
-    assert "00000000  00 00" in SCR.final and "(the first 1.0M of 3.0M)" in SCR.final and not RAN
-    more(app, "e")
-    assert "huge is binary: v shows it" in log(app) and not RAN
-    more(app, "\x1b", "/z.zip", "\n", "\n", "h", "\n")  # an archive there
-    assert app.P.up
-    app.cleanup()
-    assert not app.P.up and not left()
-    more(app, "r", "\x1b", "/bad.zip", "\n", "\n", "\x1b", "/a.txt", "\n", ("kick", 2), "v")  # not an archive; ^C fetching
-    assert "not an archive I can read (file could not be opened successfully)" in log(app) and "stopped" in log(app) and not left()
-    CFG.write_text(f'[tools]\nedit = "printf x >> {{file}}; rm -r {W / "rsub"}"\n[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
-    REAL[:] = ["printf x >>"]
-    more(app, "r", "\x1b", "/rsub", "\n", "\n", "/f", "\n", "e")  # an edit that can't go back: kept, and said where
-    kept = next(Path(x) for x in re.findall(r"your edit is in (\S+)", log(app)))
-    assert kept.read_text() == "fx"
-    shutil.rmtree(kept.parent)
-    more(app, "\x1b", "@", "\x1b", "/", "\x15", "\n")
+if config.tomllib:  # the config drives these (its [commands], [hosts], themes): Python 3.11 on
+    # --- the app: what the pty test doesn't press, each checked ---
+    os.chdir(W)
+    app = start()
+    assert "1  local:" in SCR.text() and "a.txt" in SCR.text(), SCR.text()
+    more(app, "@", K.DOWN, (2, 5, CLICK))  # a tap on a host only selects it (a login is never one stray tap away)
+    assert app.P.mode == "hosts" and app.P.cur()[2] is ui.LOCAL
+    more(app, (2, 5, CLICK))  # the second opens it
+    assert app.P.mode == "files"
+    more(app, "g", "\x15", *"su", "\t", "\n")  # go to: Tab completes in the pane's own folder
+    assert app.P.cwd == str(W / "sub")
+    more(app, "h")
+    more(app, "/", *"zz", "\x1b")  # Esc in the filter: no filter
+    assert app.P.files.flt == "" and len(app.P.files.rows) > 1
+    more(app, "@", K.F5)  # on the host list, a file action asks for a host
+    assert "pick a host first" in log(app)
+    more(app, "\x1b", "f")  # history: nothing further
+    assert "no further" in log(app)
+    more(app, "@", "/", *"zzzz", "\n", "\n", "\x1b", "\x1b")  # ⏎ on an empty filtered list: nothing
+    more(app, "/", *"a.t", K.DOWN, K.UP, K.BACKSPACE, "\x00", "\n")  # the filter: arrows move, ⌫ edits
+    assert app.P.files.flt == "a." and app.P.cur()[0] == "a.txt"
+    more(app, "\x1b", "\x06", "\x15", "\n")  # ^F with no pattern: nothing
+    more(app, "\x06", "\n")  # ^F *: everything below, found
+    assert app.P.found == "*" and any(n == "sub" for n, _ in app.P.items)
+    assert "Esc goes back" in log(app)
+    more(app, "\x1b", "D")  # Esc: out of find results, back in the folder  # the other pane shows hosts: nothing to compare with
+    assert "the other pane shows no folder" in log(app)
+    more(app, K.DOWN, "c")
+    assert "the other pane shows no folder: pick one" in log(app)
+    assert not app.P.found
+    more(app, "/z.zip", "\n", "\n", "o")  # inside an archive: no mirror; F6 refused; @ and a host leaves it
+    assert "not from inside an archive" in log(app)
+    more(app, "\t", "\n", "\t", K.DOWN, K.F6)
+    assert "an archive is read-only" in log(app)
+    more(app, "@", K.HOME, "\n")
+    assert not app.P.up and "local:" in SCR.text()
+    more(app, "@", K.DOWN, "\n", K.DOWN, "h", "h", "\n", "s", "p", K.DOWN, "s", "p")  # ← in a group: to it; ^O, p
+    assert log(app).count("no network") == 2
+    more(app, "\n")  # opening a host that can't be reached: the pane stays as it was
+    assert "no network" in log(app) and app.P.mode == "hosts"
+    more(app, "\x1b", "\x1b")
+    assert app.P.mode == "files"
+    more(app, "\x1b", "/a.txt", "\n", "c", "\x15", "/", "\n")  # copy onto a folder you can't write: the jail says no
+    assert "jail" in log(app) or "Permission" in log(app)
+    more(app, "c", "\x15", str(W), "\n")  # onto itself
+    assert "already is" in log(app)
+    more(app, "c", "\x15", str(W / "bin.dat"), "\n")
+    assert "bin.dat: not a folder" in log(app)
+    more(app, "c", "\x15", str(W / "nope" / "x"), "\n")
+    assert "No such file" in log(app)
+    (W / "sub" / "a.txt").write_text("other")
+    more(app, "c", "\x15", str(W / "sub"), "\n", "n")  # a clash, and no: nothing
+    assert (W / "sub" / "a.txt").read_text() == "other"
+    more(app, "c", "\x15", "\n")  # an empty answer: nothing
+    more(app, "A", "\x15", *"zz", "\n")  # A: a form, one row per attribute; only the rows you change are applied
+    assert "mode zz: not like 6" in log(app)
+    more(app, "A", K.DOWN, "\x15", *"nobody:nogroup", "\n")
+    assert "✓ owner nobody:nogroup" in log(app) and (W / "a.txt").stat().st_uid != 0
+    mode = (W / "a.txt").stat().st_mode
+    more(app, "A", K.DOWN, "\x15", *"99999999:0", "\n", "A", K.DOWN, "\x15", *":root", "\n", "A", "\t", "\x15", *"nouser_x:", "\n")
+    assert "nouser_x: no user by that name here" in log(app) and (W / "a.txt").stat().st_mode == mode
+    more(app, "A", K.UP, "\x15", *"2001-09-09 01:46", K.UP, K.UP, "\x15", *"600", K.DOWN, K.DOWN, "\n")  # ↑ wraps round
+    assert (W / "a.txt").stat().st_mode & 0o777 == 0o600 and time.localtime((W / "a.txt").stat().st_mtime)[:5] == (2001, 9, 9, 1, 46)
+    more(app, "A", K.LEFT, K.LEFT, "\x7f", "0", K.HOME, "\x05", K.RIGHT, K.DC, "\x1b")  # the line edits in place; Esc: nothing
+    assert (W / "a.txt").stat().st_mode & 0o777 == 0o600
+    more(app, "R", "\x15", "\n", "L", "\x15", "\n", "H", "\x15", "\n", "z")  # empty answers: nothing
+    more(app, "/bin", "\n", K.F3, "q", K.F4, "\x18")  # binary opens as hex; edited as is
+    RAN.clear()
+    more(app, "/a.txt", "\n", K.F2, K.END, "\n")  # F2: what can be done here, then your [commands]
+    assert RAN and RAN[-1][0][-1].startswith("ls a.txt;"), RAN
+    CFG.write_text("theme = [\n")  # a broken config: said, the app goes on with what it had
+    more(app, "r")
+    assert "config:" in log(app)
+    CFG.write_text('theme = "amber"\n[tools]\nedit = "true"\nview = "true"\n')
+    more(app, "r", "@", K.F4, "\x1b", "e")  # your editor for the config; for a file: your tools
+    assert any("true" in str(c) for c, _ in RAN)
+    more(app, "\x1b", "/a.txt", "\n", "v", "e", "\n")
     CFG.write_text("")
-    REAL.clear()
-    fs.connect = offline
-    for r in app.remotes.values():
-        r.close()
+    more(app, "r", "[", "]", (29, 5, UP), (29, 5, DOWN), (10, 1, RIGHT), "\x1b", (25, 100, RIGHT), "\x1b", (5, 3, DOWN),
+         (5, 70, CLICK), (5, 70, CLICK), "\x1b", (0, 2, CLICK), K.RIGHT, (0, 30, CLICK), (0, 0, CLICK), (14, 60, CLICK),
+         "\x1b", (1, 70, RIGHT), "\x1b", (29, 2, CLICK), "\x1b", (0, 119, CLICK), K.MOUSE, "?", K.DOWN, "\n", "\x1b")
+    more(app, K.F9, K.LEFT, "\n")  # a menu item in Pane 2's menu acts on pane 2
+    assert app.focus == 1
+    more(app, K.F9, (20, 100, CLICK), K.F9, K.DOWN, K.DOWN, K.NPAGE, K.PPAGE, (1, 2, UP), (1, 2, DOWN), K.END, "\x1b")
+    (W / "lnd").symlink_to("sub")  # onto a link to a folder: into the folder
+    for i in (0, 1):  # both panes here, the first one focused
+        app.act(app.open_host, app.panes[i], ui.LOCAL, str(W))
+    app.focus = 0
+    more(app, "/bin.dat", "\n", "c", "\x15", str(W / "lnd"), "\n")
+    assert (W / "sub" / "bin.dat").exists()
+    more(app, "\x1b", "/a.txt", "\n", "L", "\x15", *str(W / "sub" / "ln"), "\n")  # L: one question, where; relative
+    assert os.readlink(W / "sub" / "ln") == "../a.txt" and (W / "sub" / "ln").read_text() == (W / "a.txt").read_text()
+    more(app, "L", "\n")  # the default: the other pane's folder (here the same), the same name: taken
+    assert "File exists" in log(app).split("\n")[-1]
+    more(app, "H", "\x15", *"sub/hl", "\n")  # H: another name; relative to this folder
+    assert (W / "sub" / "hl").stat().st_ino == (W / "a.txt").stat().st_ino and "another name for a.txt" in log(app)
+    more(app, "\x1b", "/sub", "\n", "\n", "/ln", "\n", "L", "\x15", *"hl", "\n", "h", "\x1b")  # L on a link: retarget
+    assert os.readlink(W / "sub" / "ln") == "hl"
+    more(app, "\x1b", K.HOME, "L", "H", "A")  # on ..: nothing
+    more(app, "/bin.dat", "\n", K.F2, K.END, "\n", "\x1b")  # F2, no [commands]: the file actions only; the last is z
+    assert log(app).split("\n")[-1].endswith("bin.dat: 5.0K in 1 files")
+    ui.connect = lambda *a, **k: None  # a host that's logged in but doesn't answer
+    CFG.write_text('[hosts]\ng = ["nohost"]\n')
+    more(app, "r", "@", "/nohost", "\n", "p", "\x1b", "\x1b", "/", ("err",), "x", "\n", "\x1b")
+    assert "nohost: ssh: no network" in log(app)
+    ui.connect = lambda *a, **k: (_ for _ in ()).throw(ConnectionError("nohost: Permission denied (publickey)."))
+    more(app, "@", "/nohost", "\n", "p", "\x1b", "\x1b")  # p never asks for a login: it says one is wanted
+    assert "nohost answers, but wants a login" in log(app)
+    ui.connect = offline
+    more(app, "@", "/nohost", "\n", "p", "\x1b", "\x1b")
+    assert "nohost unreachable: ssh: no network" in log(app)
     os.chdir(BOX)
-    (W / "huge").unlink()
+    (W / "sub" / "many").mkdir()
+    for i in range(120):
+        (W / "sub" / "many" / str(i)).touch()
+    more(app, "\x1b", "\t", ("kick", 2), "\x06", "\n")  # ^C mid-find: what was found so far
+    assert "find stopped" in log(app)
+    more(app, "\x1b", "/sub", "\n", ("kick", 1), "z")  # ^C mid-action: just that action
+    assert "✗ stopped" in log(app)
+    more(app, "\x0c")  # ^L: the whole screen drawn again
+    assert "10quit" in SCR.text() and "1  local:" in SCR.text()
+    app.busy("a long one")  # the spinner turns by itself while a call blocks (its timer's tick, run here by hand)
+    spun = app.spun
+    app.spin()
+    assert app.spun == spun + 1 and "a long one" in SCR.text()
+    app.drawing = True  # never mid-frame
+    app.spin()
+    assert app.spun == spun + 1
+    app.drawing = False
+    app.idle()
+    more(app, "r", ("poll", 27))  # Esc while it runs: stopped there
+    assert log(app).endswith("✗ stopped")
+    more(app, K.END, "r", ("poll", ord("k")))  # anything else typed meanwhile: done after
+    assert app.P.files.sel == len(app.P.files.rows) - 2
+    more(app, "\x1b", "\x1b", "/sub", "\n", K.F8, "^C", "g", "^C")  # ^C at a question: no
+    assert (W / "sub").exists()
+    app.cleanup()
 
-# a big text file: rshm's viewer shows its first MB, its editor won't take it; ^C in a prompt cancels it;
-(W / "big").write_bytes(b"line\n" * ui.HEAD)  # a terminal with few colours gets mono
-os.chdir(W)
-app = start("/big", "\n", "v")
-assert "(the first 1.0M of 5.0M)" in SCR.final and "line" in SCR.final
-more(app, K.F4, "\x1b", "\x1b", "g", "\x03")
-assert "big is 5.0M: more than rshm's editor takes (1.0M)" in log(app)
-os.chdir(BOX)
-(W / "big").unlink()
+    # --- a host (a real sftp-server, no jail: scripted keys only): view, your tools, an edit sent back, archives ---
+    SRV = next((x for x in ("/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server", "/usr/libexec/sftp-server")
+                if os.path.exists(x)), None)
+    if SRV:
+        from rshm import sftp  # noqa: E402
+        sftp.argv = lambda h, batch=False, timeout=8: ["sh", "-c", f"exec {SRV}"]
+        fs.connect = lambda h, *a: None
+        (W / "rsub").mkdir()
+        (W / "rsub" / "f").write_text("f")
+        (W / "bad.zip").write_bytes(b"junk")
+        (W / "huge").touch()
+        os.truncate(W / "huge", 3 * ui.HEAD)  # 3 MB of zeros: binary
+        CFG.write_text(f'[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
+        app = start("@", "/srv", "\n", "\n", "/a.txt", "\n", K.F3, "q")
+        assert app.P.fs.name == "srv" and app.P.cwd == str(W)
+        CFG.write_text(f'[tools]\nview = "true"\nedit = "printf x >>"\n[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
+        REAL.append("printf x >>")
+        more(app, "r", "v", "e")  # your viewer gets a private copy; your editor's change goes back
+        assert "✓ saved a.txt" in log(app) and (W / "a.txt").read_text().endswith("x")
+        RAN.clear()  # binary, with a viewer set: never to it; rshm's hex view of the first MB; not edited
+        more(app, "\x1b", "/huge", "\n", "v")
+        assert "00000000  00 00" in SCR.final and "(the first 1.0M of 3.0M)" in SCR.final and not RAN
+        more(app, "e")
+        assert "huge is binary: v shows it" in log(app) and not RAN
+        more(app, "\x1b", "/z.zip", "\n", "\n", "h", "\n")  # an archive there
+        assert app.P.up
+        app.cleanup()
+        assert not app.P.up and not left()
+        more(app, "r", "\x1b", "/bad.zip", "\n", "\n", "\x1b", "/a.txt", "\n", ("kick", 2), "v")  # not an archive; ^C fetching
+        assert "not an archive I can read (file could not be opened successfully)" in log(app) and "stopped" in log(app) and not left()
+        CFG.write_text(f'[tools]\nedit = "printf x >> {{file}}; rm -r {W / "rsub"}"\n[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
+        REAL[:] = ["printf x >>"]
+        more(app, "r", "\x1b", "/rsub", "\n", "\n", "/f", "\n", "e")  # an edit that can't go back: kept, and said where
+        kept = next(Path(x) for x in re.findall(r"your edit is in (\S+)", log(app)))
+        assert kept.read_text() == "fx"
+        shutil.rmtree(kept.parent)
+        more(app, "\x1b", "@", "\x1b", "/", "\x15", "\n")
+        CFG.write_text("")
+        REAL.clear()
+        fs.connect = offline
+        for r in app.remotes.values():
+            r.close()
+        os.chdir(BOX)
+        (W / "huge").unlink()
 
-# themes: t picks one this terminal can show, the pick saved; fewer colours than a theme needs: the default theme;
-CFG.write_text('theme = "amber"\n')  # none, NO_COLOR, or no colours of its own where a theme needs them: bold, reverse
-app = start("t", K.END, "\n")
-last = list(ui.THEMES)[-1]
-assert app.theme_name == last and f'theme = "{last}"' in CFG.read_text() and "instead" not in log(app)
-CFG.write_text('theme = "amber"\n')
-FAKE.COLORS = 8
-app = start("t", K.DOWN, "\n")  # only what this terminal shows is offered: here the default theme alone
-assert app.theme_name == "default" and app.C is not ui.MONO and [n for n in ui.THEMES if app.can(n)] == ["default"]
-assert "theme amber: this terminal shows 8 colours; default instead" in log(app), log(app)
-FAKE.COLORS = 256
-os.environ["NO_COLOR"] = "1"
-CFG.write_text('theme = "amber"\n')
-app = start("t")
-assert app.C is ui.MONO and "theme amber: NO_COLOR is set; bold and reverse instead" in log(app)
-assert "no theme to pick: NO_COLOR is set" in log(app) and 'theme = "amber"' in CFG.read_text()  # the choice stays
-os.environ["NO_COLOR"] = ""  # set but empty: colours (no-color.org)
-assert start().C is not ui.MONO
-del os.environ["NO_COLOR"]
-FAKE.has_colors = lambda: False
-app = start("t")
-assert app.C is ui.MONO and "this terminal shows no colours" in log(app)
-FAKE.has_colors = lambda: True
-FAKE.use_default_colors = lambda: (_ for _ in ()).throw(real.error("no default colours"))
-CFG.write_text('theme = "default"\n')  # the default theme uses the terminal's own colours: here, none to use
-app = start()
-assert app.C is ui.MONO and not app.can("default") and app.can("matrix")
-FAKE.COLORS = 8  # and 8 colours: no theme at all to pick, and the reason given is the real one
-more(app, "t")
-assert "no theme to pick: this terminal shows 8 colours" in log(app)
-FAKE.COLORS = 256
-FAKE.use_default_colors = nop
-CFG.write_text("")
+    # a big text file: rshm's viewer shows its first MB, its editor won't take it; ^C in a prompt cancels it;
+    (W / "big").write_bytes(b"line\n" * ui.HEAD)  # a terminal with few colours gets mono
+    os.chdir(W)
+    app = start("/big", "\n", "v")
+    assert "(the first 1.0M of 5.0M)" in SCR.final and "line" in SCR.final
+    more(app, K.F4, "\x1b", "\x1b", "g", "\x03")
+    assert "big is 5.0M: more than rshm's editor takes (1.0M)" in log(app)
+    os.chdir(BOX)
+    (W / "big").unlink()
+
+    # themes: t picks one this terminal can show, the pick saved; fewer colours than a theme needs: the default theme;
+    CFG.write_text('theme = "amber"\n')  # none, NO_COLOR, or no colours of its own where a theme needs them: bold, reverse
+    app = start("t", K.END, "\n")
+    last = list(ui.THEMES)[-1]
+    assert app.theme_name == last and f'theme = "{last}"' in CFG.read_text() and "instead" not in log(app)
+    CFG.write_text('theme = "amber"\n')
+    FAKE.COLORS = 8
+    app = start("t", K.DOWN, "\n")  # only what this terminal shows is offered: here the default theme alone
+    assert app.theme_name == "default" and app.C is not ui.MONO and [n for n in ui.THEMES if app.can(n)] == ["default"]
+    assert "theme amber: this terminal shows 8 colours; default instead" in log(app), log(app)
+    FAKE.COLORS = 256
+    os.environ["NO_COLOR"] = "1"
+    CFG.write_text('theme = "amber"\n')
+    app = start("t")
+    assert app.C is ui.MONO and "theme amber: NO_COLOR is set; bold and reverse instead" in log(app)
+    assert "no theme to pick: NO_COLOR is set" in log(app) and 'theme = "amber"' in CFG.read_text()  # the choice stays
+    os.environ["NO_COLOR"] = ""  # set but empty: colours (no-color.org)
+    assert start().C is not ui.MONO
+    del os.environ["NO_COLOR"]
+    FAKE.has_colors = lambda: False
+    app = start("t")
+    assert app.C is ui.MONO and "this terminal shows no colours" in log(app)
+    FAKE.has_colors = lambda: True
+    FAKE.use_default_colors = lambda: (_ for _ in ()).throw(real.error("no default colours"))
+    CFG.write_text('theme = "default"\n')  # the default theme uses the terminal's own colours: here, none to use
+    app = start()
+    assert app.C is ui.MONO and not app.can("default") and app.can("matrix")
+    FAKE.COLORS = 8  # and 8 colours: no theme at all to pick, and the reason given is the real one
+    more(app, "t")
+    assert "no theme to pick: this terminal shows 8 colours" in log(app)
+    FAKE.COLORS = 256
+    FAKE.use_default_colors = nop
+    CFG.write_text("")
 
 # --- the monkey: random keys, taps and sizes; never an error that isn't an OSError, never a write off the screen ---
 TYPES = {n for n, v in vars(builtins).items() if isinstance(v, type) and issubclass(v, BaseException)} | {"error"}
