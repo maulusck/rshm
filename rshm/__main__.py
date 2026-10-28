@@ -24,7 +24,7 @@ def pyz(out):  # this very rshm as one runnable file, from wherever it runs (sou
 def terminal():  # the terminal ncurses will draw on -> a note for the log. A TERM this machine has no entry for
     term = os.environ.get("TERM", "")  # (kitty, ghostty over ssh) is drawn as xterm-256color, which every modern one
     if not (sys.stdin.isatty() and sys.stdout.isatty()):  # speaks; one that can't place its cursor (dumb): refused
-        sys.exit("rshm needs a terminal")
+        sys.exit("rshm: not a terminal")
     note = ""
     try:
         curses.setupterm()
@@ -33,21 +33,20 @@ def terminal():  # the terminal ncurses will draw on -> a note for the log. A TE
         try:
             curses.setupterm()
         except curses.error:
-            sys.exit(f"rshm: no terminfo for TERM={term or '(unset)'} here, nor for xterm-256color")
-        note = f"TERM={term or '(unset)'} is unknown here: drawn as xterm-256color"
+            sys.exit(f"rshm: no terminfo for TERM={term or '(unset)'} or xterm-256color")
+        note = f"TERM={term or '(unset)'} unknown, using xterm-256color"
     if not curses.tigetstr("cup"):
-        sys.exit(f"rshm needs a terminal that can move its cursor; TERM={term} can't")
+        sys.exit(f"rshm: TERM={term} cannot address the cursor")
     return note
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="rshm", description="Remote SHell Manager: a two-pane file manager for this "
-                                 "machine and every host in your ~/.ssh/config, over plain ssh.",
+    ap = argparse.ArgumentParser(prog="rshm", description="two-pane file manager for this host and ssh hosts, over sftp",
                                  epilog=keys_help(), formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("host", nargs="*", help="up to two hosts to open (name, group/name or unique substring)")
-    ap.add_argument("-c", "--config", type=Path, help=f"config file (default: {config.locate()}, if there)")
+    ap.add_argument("host", nargs="*", help="host to open: name, group/name or unique part (at most two)")
+    ap.add_argument("-c", "--config", type=Path, help=f"config file (default {config.locate()})")
     ap.add_argument("-V", "--version", action="version", version=f"rshm {__version__}")
-    ap.add_argument("--pyz", type=Path, metavar="FILE", help="write this rshm as one runnable file (python3 FILE) and exit")
+    ap.add_argument("--pyz", type=Path, metavar="FILE", help="write rshm as a single executable file and exit")
     a = ap.parse_args()
     if a.pyz:
         return pyz(a.pyz.expanduser())
@@ -57,7 +56,7 @@ def main():
     if a.config and config.unread(cfg):
         ap.error(config.unread(cfg))
     if len(a.host) > 2:
-        ap.error("two panes: at most two hosts")
+        ap.error("at most two hosts")
     start = []
     if a.host:  # resolved before the screen opens, so a typo is a plain error
         try:
@@ -68,7 +67,7 @@ def main():
             m = config.find(hs, name)
             if len(m) != 1:
                 ap.error(f"ambiguous host {name!r}: {', '.join('/'.join(p) for p, _ in m)}" if m
-                         else f"no host {name!r} in your config or ~/.ssh/config")
+                         else f"no such host: {name!r}")
             start.append(m[0][0])
     for sig in (signal.SIGTERM, signal.SIGHUP):  # kill or a closed terminal unwind normally: terminal and logins cleaned
         signal.signal(sig, lambda n, _: sys.exit(128 + n))
@@ -79,7 +78,7 @@ def main():
     except KeyboardInterrupt:
         pass
     except curses.error as e:
-        sys.exit(f"rshm needs a terminal ({e})")
+        sys.exit(f"rshm: {e}")
 
 
 if __name__ == "__main__":

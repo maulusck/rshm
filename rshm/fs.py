@@ -182,9 +182,10 @@ class Remote:  # a host; its SFTP session opens on first use and reopens after a
     def realpath(s, p):
         return s.sftp().realpath(re.sub(r"^~(/|$)", "", p) or ".")  # sftp starts in $HOME, so ~/x is just x
 
-    def run(s, script, d):  # ponytail: `cd &&` needs a POSIX login shell; per-shell quoting if a fish/csh host shows up
+    def run(s, script, d):  # in sh whatever the login shell (fish, csh): `cd &&` and the script's own quoting hold
         s.login()
-        return [*argv(s.h), "-t", s.h["host"], f"cd {shlex.quote(d)} && {script}" if d else script], None
+        script = f"cd {shlex.quote(d)} && {script}" if d else script
+        return [*argv(s.h), "-t", s.h["host"], f"exec sh -c {shlex.quote(script)}"], None
 
     def alive(s):
         return s.sf is None or s.sf.alive()
@@ -222,7 +223,7 @@ class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a fold
                 while s.z.fileobj.read(1 << 20):  # on to its end, where gzip checks what it held (a tar has no check)
                     pass
         except (*BROKEN, OSError) as e:
-            raise OSError(f"{name}: not an archive I can read ({str(e).splitlines()[0].rstrip(':')})") from None
+            raise OSError(f"{name}: unreadable archive ({str(e).splitlines()[0].rstrip(':')})") from None
         for n, a in entries:  # "./x" and "x" are the same entry; "./" is the top itself
             if (p := posixpath.normpath("/" + n)) != "/":
                 s.files[p] = a
@@ -254,7 +255,7 @@ class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a fold
     def readlink(s, p):
         a = s.stat(p, follow=False)
         if "link" not in a:
-            raise OSError(f"{p}: not a link")
+            raise OSError(f"{p}: not a symbolic link")
         return a["link"]
 
     def free(s, p):
@@ -268,14 +269,14 @@ class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a fold
                 while off < size:
                     b = f.read(min(CHUNK, size - off))
                     if not b:
-                        raise OSError(f"{p}: shorter than the archive says")
+                        raise OSError(f"{p}: truncated in archive")
                     off += len(b)
                     yield b
         except BROKEN as e:
-            raise OSError(f"{p}: damaged in {s.name} ({e})") from None
+            raise OSError(f"{p}: corrupt in {s.name} ({e})") from None
 
     def readonly(s, *_, **__):
-        raise OSError(f"{s.name} is an archive: read-only")
+        raise OSError(f"{s.name}: read-only archive")
 
     mkdir = rmdir = unlink = rename = symlink = hardlink = chattr = write = run = readonly
 
@@ -366,9 +367,9 @@ def save(fs, p, data):  # p's content replaced at once (never half-written), its
 def copy(src, sp, dst, dp, tick, follow=False):
     """src:sp -> dst:dp, a file or a tree, like cp -pP: content, mode and times travel; a link travels as a link
     (follow: what it points to instead). The source is looked at now, never trusted from an older listing. Each file
-    lands as NAME.rshm-part, resumed if one is there, renamed into place when complete; replacing a file keeps its
-    mode. tick(path, at, resumed) reports progress; tick.finished holds what already made it, so a retry after a
-    dropped link skips it; tick.skipped gets the pipes, sockets and devices of a tree, which are never opened.
+    lands as NAME.rshm-part, resumed if one is there, renamed into place when complete; a file it replaces takes the
+    source's mode. tick(path, at, resumed) reports progress; tick.finished holds what already made it, so a retry
+    after a dropped link skips it; tick.skipped gets the pipes, sockets and devices of a tree, which are never opened.
     Within one host the server copies by itself where it can (OpenSSH 9.0+), else a second session reads: one
     session's reads in flight would block its writes."""
     one = src is dst and isinstance(src, Remote)
@@ -420,13 +421,12 @@ def _copy(src, sp, dst, dp, tick, a, there, here):
         return
     if old and islink(old):  # write through a link, like cp: the link stays, its target gets the new content
         dp, there = dst.realpath(dp), None
-        old = dst.stat(dp)
     part = there.get(name + PART) if there is not None else peek(dst, dp + PART)
     size, off = a.get("size", 0), (part or {}).get("size", 0)
     n = min(off, CHUNK)  # resumed only if its last bytes are the source's: not a stray file, not an older version
     if off > size or n and b"".join(dst.read(dp + PART, off - n, off)) != b"".join(src.read(sp, off - n, off)):
         off = 0
-    ch = keep(a) | {"perm": ((old or a).get("perm") or 0o644) & 0o777}
+    ch = keep(a)  # the source's mode and time, over a file there too: a copy is the source, not a blend
     tick(sp, off, resumed=True)
     try:
         if here:
@@ -439,7 +439,7 @@ def _copy(src, sp, dst, dp, tick, a, there, here):
                 dst.write(dp + PART, itertools.chain(first, chunks), off, ch, lambda at: tick(sp, at))
             finally:
                 chunks.close()
-        dst.rename(dp + PART, dp)  # ponytail: a replaced file is now the copier's; chown from old if root needs it
+        dst.rename(dp + PART, dp)  # the owner: whoever copies (ids differ from host to host), as rsync without root
     except KeyboardInterrupt:  # stopped by you: nothing of it stays there (a lost link keeps it, to resume)
         with contextlib.suppress(OSError):
             dst.unlink(dp + PART)

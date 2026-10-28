@@ -7,40 +7,49 @@ from collections import deque
 from . import config, edit as editor, view as viewer
 from .fs import (ARCHIVES, PART, Archive, Local, Remote, complete, copy, folder, isdir, islink, join, kind, look, marker,
                  names, peek, rm, save, special, walk)
-from .screen import (CLICK, MOVES, RIGHT, WHEEL_DOWN, WHEEL_UP, bar, cells, cursor, dur, fit, human, line, plain,
+from .screen import (CLICK, MOVES, RIGHT, WHEEL_DOWN, WHEEL_UP, bar, cells, cursor, dur, fit, human, line, many, plain,
                      readline, safe, span, window)
 from .ssh import argv, connect, quiet, unreachable
 
 ROLES = ("norm", "sel", "acc", "dim", "err", "bar", "dir", "exe", "link", "stale", "archive", "media", "special",
          "hidden", "file", "ok")
-THEMES = {  # (fg, bg[, b(old) d(im)]) per role; -1 = the terminal's own
-    "default": [(-1, -1), (0, 6), (6, -1, "b"), (-1, -1, "d"), (1, -1, "b"), (0, 6), (4, -1, "b"), (2, -1, "b"), (6, -1),
-                (1, -1), (5, -1), (3, -1), (3, -1, "b"), (-1, -1, "d"), (-1, -1), (2, -1, "b")],  # your terminal's colours
-    "matrix": [(34, 16), (16, 46), (46, 16, "b"), (22, 16), (196, 16, "b"), (46, 22), (46, 16, "b"), (120, 16, "b"),
-               (37, 16), (124, 16), (112, 16), (77, 16), (226, 16), (28, 16), (34, 16), (46, 16, "b")],  # phosphor
-    "amber": [(214, 16), (16, 214), (220, 16, "b"), (130, 16), (196, 16, "b"), (222, 94), (220, 16, "b"), (228, 16, "b"),
-              (179, 16), (124, 16), (215, 16), (222, 16), (231, 16, "b"), (94, 16), (214, 16), (228, 16, "b")],  # amber CRT
-    "frutiger": [(24, 195), (231, 38), (31, 195, "b"), (109, 195), (160, 195, "b"), (231, 33), (25, 195, "b"),
-                 (28, 195, "b"), (37, 195), (160, 195), (97, 195), (35, 195), (130, 195, "b"), (109, 195),
-                 (24, 195), (28, 195, "b")],  # Aero: sky, aqua, glass
-    "teletext": [(231, 16), (16, 226), (51, 16, "b"), (27, 16), (196, 16, "b"), (226, 21), (226, 16, "b"), (46, 16, "b"),
-                 (51, 16), (196, 16), (201, 16), (46, 16), (201, 16, "b"), (27, 16), (231, 16), (46, 16, "b")],  # Ceefax
-    "avionics": [(252, 16), (16, 201), (51, 16, "b"), (244, 16), (196, 16, "b"), (51, 236), (87, 16, "b"), (46, 16, "b"),
-                 (80, 16), (160, 16), (214, 16), (171, 16), (220, 16, "b"), (240, 16), (252, 16), (46, 16, "b")],  # cockpit
-    "robot": [(252, 236), (16, 220), (208, 236, "b"), (243, 236), (196, 236, "b"), (16, 208), (214, 236, "b"),
-              (118, 236, "b"), (110, 236), (160, 236), (180, 236), (175, 236), (226, 236, "b"), (241, 236), (252, 236),
-              (118, 236, "b")],  # machine shop: graphite, safety orange, warning yellow
-    "cyberwave": [(189, 53), (16, 51), (213, 53, "b"), (97, 53), (203, 53, "b"), (16, 213), (51, 53, "b"), (121, 53, "b"),
-                  (87, 53), (203, 53), (215, 53), (219, 53), (226, 53, "b"), (133, 53), (189, 53), (121, 53, "b")],  # neon
-    "steel": [(146, 235), (235, 110), (110, 235, "b"), (60, 235), (167, 235, "b"), (252, 60), (153, 235, "b"),
-              (151, 235, "b"), (109, 235), (167, 235), (144, 235), (182, 235), (187, 235, "b"), (60, 235), (146, 235),
-              (108, 235, "b")],  # blue-grey, calm
-    "paper": [(236, 230), (236, 223), (88, 230, "b"), (137, 230), (124, 230, "b"), (230, 94), (24, 230, "b"),
-              (22, 230, "b"), (30, 230), (124, 230), (94, 230), (90, 230), (130, 230, "b"), (144, 230), (236, 230),
-              (22, 230, "b")],  # a book: cream page, ink, red rubrics, a highlighter, a leather spine
-    "ember": [(166, 16), (16, 166), (202, 16, "b"), (88, 16), (196, 16, "b"), (16, 130), (202, 16, "b"), (208, 16, "b"),
-              (173, 16), (124, 16), (136, 16), (168, 16), (220, 16, "b"), (88, 16), (166, 16), (178, 16, "b")],  # night
+THEMES = {  # each theme's colours, by name (xterm 256; -1 the terminal's own); every role of the screen derives from
+    # them by one rule (pairs). sel: the cursor, bar: the menu and key bars, both (text, background)
+    "default": dict(bg=-1, fg=-1, faint=-1, acc=6, err=1, ok=2, dir=4, exe=2, link=6, archive=5, media=3, special=3,
+                    sel=(0, 6), bar=(0, 6)),  # your terminal's own colours
+    "matrix": dict(bg=16, fg=34, faint=28, acc=46, err=196, ok=46, dir=46, exe=120, link=37, archive=112, media=77,
+                   special=226, sel=(16, 46), bar=(46, 22)),  # phosphor
+    "amber": dict(bg=16, fg=214, faint=130, acc=220, err=196, ok=228, dir=220, exe=228, link=179, archive=215, media=222,
+                  special=231, sel=(16, 214), bar=(228, 94)),  # amber CRT
+    "frutiger": dict(bg=195, fg=24, faint=102, acc=25, err=160, ok=22, dir=25, exe=22, link=23, archive=97, media=90,
+                     special=94, sel=(17, 38), bar=(231, 25)),  # Aero: sky, aqua, glass
+    "teletext": dict(bg=16, fg=231, faint=27, acc=51, err=196, ok=46, dir=226, exe=46, link=51, archive=201, media=46,
+                     special=201, sel=(16, 226), bar=(226, 21)),  # Ceefax
+    "avionics": dict(bg=16, fg=252, faint=242, acc=51, err=196, ok=46, dir=87, exe=46, link=80, archive=214, media=171,
+                     special=220, sel=(16, 201), bar=(51, 236)),  # glass cockpit: cyan data, magenta selected, amber caution
+    "robot": dict(bg=236, fg=252, faint=245, acc=208, err=210, ok=118, dir=214, exe=118, link=110, archive=180, media=175,
+                  special=226, sel=(16, 220), bar=(16, 208)),  # machine shop: graphite, safety orange, warning yellow
+    "cyberwave": dict(bg=53, fg=189, faint=103, acc=213, err=210, ok=121, dir=51, exe=121, link=87, archive=215, media=219,
+                      special=226, sel=(16, 51), bar=(16, 213)),  # neon
+    "steel": dict(bg=235, fg=146, faint=243, acc=110, err=174, ok=108, dir=153, exe=151, link=109, archive=144, media=182,
+                  special=187, sel=(235, 110), bar=(254, 60)),  # blue-grey, calm
+    "paper": dict(bg=230, fg=236, faint=138, acc=88, err=124, ok=22, dir=24, exe=22, link=23, archive=94, media=90,
+                  special=130, sel=(236, 223), bar=(230, 94)),  # a book: cream page, ink, red rubrics, a highlighter
+    "ember": dict(bg=16, fg=166, faint=130, acc=202, err=196, ok=178, dir=202, exe=208, link=173, archive=136, media=168,
+                  special=220, sel=(16, 166), bar=(16, 172)),  # night: dark-adapted reds and oranges
 }
+
+
+def pairs(t):  # a theme -> (text, background[, b(old) d(im)]) per role, in ROLES order: one rule for every theme
+    bg = t["bg"]
+    faint = (t["faint"], bg, "d") if t["faint"] == t["fg"] else (t["faint"], bg)  # no faint colour: the dim attribute
+    role = dict(norm=(t["fg"], bg), sel=t["sel"], acc=(t["acc"], bg, "b"), dim=faint, err=(t["err"], bg, "b"),
+                bar=t["bar"], dir=(t["dir"], bg, "b"), exe=(t["exe"], bg, "b"), link=(t["link"], bg), stale=(t["err"], bg),
+                archive=(t["archive"], bg), media=(t["media"], bg), special=(t["special"], bg, "b"), hidden=faint,
+                file=(t["fg"], bg), ok=(t["ok"], bg, "b"))
+    return [role[r] for r in ROLES]
+
+
 MONO = dict(zip(ROLES, (0, curses.A_REVERSE, curses.A_BOLD, curses.A_DIM, curses.A_BOLD | curses.A_STANDOUT,
                         curses.A_REVERSE, curses.A_BOLD, curses.A_BOLD, 0, curses.A_DIM, 0, 0, curses.A_BOLD,
                         curses.A_DIM, 0, curses.A_BOLD)))
@@ -50,33 +59,33 @@ NAMES = {"Enter": (10, 13, curses.KEY_ENTER), "→": (curses.KEY_RIGHT,), "←":
          "Esc": (27,), **{f"^{c}": (ord(c) - 64,) for c in "FLORU"}, **{f"F{i}": (curses.KEY_F0 + i,) for i in range(1, 11)}}
 MENUS = ("Pane 1", "File", "Mark", "Command", "Options", "Pane 2")
 KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under both pane menus; no menu: help only
-    ("File", "Enter → l", "open", "open"), ("File", "← h Bksp", "parent folder", "parent"),
-    ("File", "i", "info: everything about it", "info"), ("File", "F3 v", "view", "view"), ("File", "F4 e", "edit", "edit"),
-    ("File", "F5 c", "copy to the other pane", "copy"), ("File", "F6 m", "move to the other pane", "move"),
-    ("File", "F7 n", "mkdir: new folder", "mkdir"), ("File", "F8 x Del", "delete", "delete"),
-    ("File", "R", "rename", "rename"), ("File", "A", "attributes: mode, owner, time", "chattr"),
-    ("File", "L", "symlink to it (on a link: retarget)", "symlink"),
-    ("File", "H", "hard link to it", "hardlink"),
-    ("File", "z", "size", "size"),
-    ("Mark", "Space Ins", "mark", "mark"), ("Mark", "*", "all / none", "markall"),
-    ("Mark", "+", "mark by pattern (*.log)", "markpat"), ("Mark", "-", "unmark by pattern", "unmarkpat"),
-    ("Mark", "D", "differences from the other pane", "compare"),
+    ("File", "Enter → l", "open", "open"), ("File", "← h Bksp", "parent directory", "parent"),
+    ("File", "i", "information", "info"), ("File", "F3 v", "view", "view"), ("File", "F4 e", "edit", "edit"),
+    ("File", "F5 c", "copy to other pane", "copy"), ("File", "F6 m", "move to other pane", "move"),
+    ("File", "F7 n", "mkdir", "mkdir"), ("File", "F8 x Del", "delete", "delete"), ("File", "R", "rename", "rename"),
+    ("File", "A", "mode, owner, time", "chattr"), ("File", "L", "symbolic link (on a link: change target)", "symlink"),
+    ("File", "H", "hard link", "hardlink"), ("File", "z", "disk usage", "size"),
+    ("Mark", "Space Ins", "mark", "mark"), ("Mark", "*", "mark all / none", "markall"),
+    ("Mark", "+", "mark by pattern", "markpat"), ("Mark", "-", "unmark by pattern", "unmarkpat"),
+    ("Mark", "D", "mark differences", "compare"),
     ("Pane", "@", "host list", "hostlist"), ("Pane", "Tab", "other pane", "tab"), ("Pane", "/", "filter", "search"),
-    ("Pane", "S", "sort: name, extension, size, date", "sort"), ("Pane", ".", "dotfiles: show / hide", "dotfiles"),
-    ("Pane", "b", "back", "back"), ("Pane", "f", "forward", "forward"), ("Pane", "g", "go to path", "goto"),
-    ("Pane", "~", "home", "home"), ("Pane", "^F", "find by name, below here", "find"), ("Pane", "o", "other pane here", "mirror"),
-    ("Pane", "^U", "swap panes", "swap"), ("Pane", "r ^R", "reload", "reload"),
-    ("Pane", "Esc", "back: filter, marks, find, host list", "esc"),
-    ("Command", "F2", "menu: what can be done here", "menu"), ("Command", "^O s", "shell here", "shell"),
-    ("Command", "p", "live check of the host", "ping"),
-    ("Options", "F9", "bar: the menus up top", "menubar"), ("Options", "t", "theme: pick one", "theme"),
-    ("Options", "[ ]", "log: older / newer", "logscroll"), ("Options", "", "edit config (F4 on the host list)", "editcfg"),
-    ("Options", "^L", "draw the screen again", "draw"), ("Options", "F1 ?", "help: all keys", "help"),
-    ("Options", "F10 q", "quit", "quit"),
-    (None, "↑ ↓ j k PgUp PgDn Home End", "move", None), (None, "click · again", "select · open", None),
-    (None, "right-click", "menu of what's under it (F2)", None), (None, "wheel", "scroll (panes, log)", None),
+    ("Pane", "S", "sort", "sort"), ("Pane", ".", "show / hide dotfiles", "dotfiles"),
+    ("Pane", "b", "history back", "back"), ("Pane", "f", "history forward", "forward"),
+    ("Pane", "g", "go to directory", "goto"), ("Pane", "~", "home directory", "home"),
+    ("Pane", "^F", "find by name", "find"), ("Pane", "o", "same directory in other pane", "mirror"),
+    ("Pane", "^U", "swap panes", "swap"), ("Pane", "r ^R", "reread", "reload"), ("Pane", "Esc", "cancel", "esc"),
+    ("Command", "F2", "menu", "menu"), ("Command", "^O s", "shell", "shell"), ("Command", "p", "check host", "ping"),
+    ("Options", "F9", "pulldown menus", "menubar"), ("Options", "t", "theme", "theme"),
+    ("Options", "[ ]", "scroll log", "logscroll"), ("Options", "", "edit config (F4 on host list)", "editcfg"),
+    ("Options", "^L", "redraw", "draw"), ("Options", "F1 ?", "help", "help"), ("Options", "F10 q", "quit", "quit"),
+    (None, "↑ ↓ j k PgUp PgDn Home End", "move cursor", None), (None, "click, click again", "select, open", None),
+    (None, "right-click", "menu (F2)", None), (None, "wheel", "scroll", None),
 ]
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+VERBS = {"copy": ("copying", "copied"), "move": ("moving", "moved"), "delete": ("deleting", "deleted"),  # each operation,
+         "mkdir": ("creating", "created"), "rename": ("renaming", "renamed"), "link": ("linking", "linked"),  # as it runs
+         "change": ("changing", "changed"), "save": ("saving", "saved")}  # and as the log keeps it
+LONG = 0.5  # s: an action running longer shows itself (its log line, the box); keys typed meanwhile are dropped
 HEAD = 1 << 20  # rshm's viewer shows a file's first HEAD bytes; its editor takes files up to HEAD
 ORDER = {"name": lambda x: x[0].casefold(), "extension": lambda x: (posixpath.splitext(x[0])[1].casefold(), x[0]),
          "size": lambda x: -x[1].get("size", 0), "date": lambda x: -x[1].get("mtime", 0)}
@@ -107,6 +116,15 @@ def fkeys():  # [(n, label, method)]: what the F-keys do, mc's ten, from the tab
 
 def menu_rows(m):  # a menu's rows; the two pane menus share theirs
     return [r for r in KEYS if r[0] == ("Pane" if m.startswith("Pane") else m)]
+
+
+def reason(e):  # an OSError as Unix tools put it, "path: Permission denied"; a part file named as the file it becomes
+    names = " -> ".join(str(f) for f in (e.filename, e.filename2) if f is not None)
+    return (f"{names}: {e.strerror}" if names else e.strerror or str(e)).replace(PART, "")
+
+
+def entries(items):  # what an operation acts on, named: "notes.md", "build/", "3 entries"
+    return items[0][0] + "/" * isdir(items[0][1]) if len(items) == 1 else f"{len(items)} entries"
 
 
 def layout(H, W):  # -> ([(pane or None for the focused one, y, x, h, w)], log rows), or None when too small
@@ -172,7 +190,10 @@ class App:
         s.panes, s.focus, s.rects, s.single, s.spans, s.opened = [Pane(), Pane()], 0, [], False, {}, None  # opened: menu
         s.local, s.remotes, s.hosts, s.c, s.cmds, s.theme_name, s.shown = Local(), {}, {}, {}, {}, "default", ""
         s.dots, s.order, s.rev = True, "name", False
-        s.log, s.logoff, s.working, s.spun, s.drawing = deque(maxlen=500), 0, None, 0, False
+        s.log, s.logoff, s.drawing = deque(maxlen=500), 0, False
+        s.job, s.since, s.paused, s.held, s.ahead, s.doing = None, 0.0, False, 0.0, [], None  # what runs: (what, done
+        # 0-1 or None, numbers), since when; held: seconds paused in all; ahead: keys typed while it ran, for after it;
+        # doing: the operation under way, as its log line names it
         if note:
             s.note(note)
         cursor(0)
@@ -205,14 +226,14 @@ class App:
 
     def folder(s):  # the focused pane, when it shows a folder: what file actions need
         if s.P.mode != "files":
-            raise OSError("pick a host first: Enter on it")
+            raise OSError("no host selected")
         return s.P
 
     def load(s):  # the config (a broken one: what it had, at the start nothing) and ~/.ssh/config's hosts with it
         try:
             c = config.read(s.cfg)
             if config.unread(s.cfg):
-                s.msg = f"{config.unread(s.cfg)}: built-ins and ~/.ssh/config's hosts"
+                s.msg = config.unread(s.cfg)
         except OSError as e:
             c, s.msg = s.c, f"✗ config: {e}"
         old = {h["host"]: h for *_, h, _ in config.flat(s.hosts, set()) if h}
@@ -229,25 +250,25 @@ class App:
             s.sync(p)
 
     def can(s, name):  # can this terminal show the theme: as many colours, and its own (-1) where the theme uses them?
-        t = THEMES[name]
+        t = pairs(THEMES[name])
         fits = max(max(x[:2]) for x in t) < curses.COLORS
         return s.colours and fits and (s.defaults or min(min(x[:2]) for x in t) >= 0)
 
     def lack(s):  # why a theme can't show
-        return "NO_COLOR is set" if curses.has_colors() and not s.colours else \
-            f"this terminal shows {curses.COLORS if s.colours else 'no'} colours"
+        return "NO_COLOR set" if curses.has_colors() and not s.colours else \
+            f"terminal has {curses.COLORS if s.colours else 'no'} colours"
 
     def set_theme(s, name):  # the theme as named (and saved); shown if this terminal can, else the default theme, else
         s.theme_name = name if name in THEMES else "default"  # none: bold, reverse and dim. Never a theme half shown
         shown = next((n for n in (s.theme_name, "default") if s.can(n)), None)
         s.C = MONO
         if shown:
-            t = THEMES[shown]
+            t = pairs(THEMES[shown])
             for i, x in enumerate(t, 1):
                 curses.init_pair(i, x[0], x[1])
             s.C = {r: curses.color_pair(i) | STYLE.get(x[2:3] and x[2], 0) for i, (r, x) in enumerate(zip(ROLES, t), 1)}
         if shown not in (s.theme_name, s.shown):  # a theme not shown as named: said once
-            s.note(f"theme {s.theme_name}: {s.lack()}; {shown or 'bold and reverse'} instead")
+            s.note(f"theme {s.theme_name}: {s.lack()}, using {shown or 'no colours'}")
         s.shown = shown
         s.scr.bkgd(" ", s.C["norm"])
 
@@ -263,32 +284,81 @@ class App:
             v.sel = min(v.sel, max(len(v.rows) - 1, 0))
 
     # --- processes ---
-    def busy(s, what):  # say what's going on (the spinner turns by itself while a call blocks); Esc stops it here,
-        if not s.working:  # ^C anywhere
-            s.t0 = time.monotonic()
-            signal.setitimer(signal.ITIMER_REAL, 0.12, 0.12)
-        s.working = what
-        s.paint()
+    @staticmethod
+    def where(p):  # a pane's folder, as titles and the log name it
+        return f"{p.fs.name}:{p.cwd}"
+
+    def op(s, verb, what, fn):  # one operation, one log line: "copying x to y" while it runs, then "✓ copied x to y"
+        ing, ed = VERBS[verb]     # and fn's own words (its numbers), or "✗ copying x to y: why"
+        s.doing = f"{ing} {what}"
+        try:
+            more = fn() or ""
+        except OSError as e:
+            s.doing = None
+            raise OSError(f"{ing} {what}: {reason(e)}") from None
+        s.doing = None
+        s.note(f"✓ {ed} {what}{more}")
+
+    def busy(s, what, done=None, numbers=""):  # an action says how far it is: its keys read; shown once it runs long
+        if not s.job:
+            s.since = time.monotonic()
+            signal.setitimer(signal.ITIMER_REAL, 0.12, 0.12)  # the tick: the same, while a call blocks
+        s.job = what, done, numbers
+        s.spin()
+
+    def spin(s, *_):  # SIGALRM: Python runs this between two steps, never inside a curses call; never mid-frame
+        if s.job and not s.drawing:
+            if s.long():
+                s.paint()
+            s.poll()
+
+    def turn(s):  # what runs, in one cell: turning, or paused
+        return "‖" if s.paused else SPIN[int(time.monotonic() * 8) % len(SPIN)]
+
+    def long(s):  # an action shows itself once it runs long, or at once when paused
+        return s.paused or time.monotonic() - s.since >= LONG
+
+    def poll(s):  # the keys hit meanwhile, all of them: Esc stops (as ^C does), Space pauses; any other, for after
         s.scr.refresh()
         s.scr.nodelay(True)
         try:
-            k = s.scr.getch()
+            ks = [s.button(k) for k in iter(s.scr.getch, -1)]
         finally:
             s.scr.nodelay(False)
+        s.ahead += [k for k in ks if k not in (27, 32, curses.KEY_MOUSE, curses.KEY_RESIZE)]
+        if 27 in ks:
+            raise KeyboardInterrupt
+        if 32 in ks:
+            s.pause()
+
+    def pause(s):  # nothing moves until Space again, Esc stops; the clock stands still (a pause isn't a slow link)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        s.paused, t, k = True, time.monotonic(), None
+        try:
+            while k not in (32, 27):
+                s.paint()
+                k = s.button(s.scr.getch())
+        finally:
+            s.paused, s.held = False, s.held + time.monotonic() - t
+            signal.setitimer(signal.ITIMER_REAL, 0.12, 0.12)
         if k == 27:
             raise KeyboardInterrupt
-        if k != -1:
-            curses.ungetch(k)  # typed ahead: it's for after
+        s.paint()
+        s.scr.refresh()
+
+    def clock(s):  # seconds, paused time left out: what speeds and times are measured by
+        return time.monotonic() - s.held
+
+    def button(s, k):  # a tap on a button of the box is its key; any other tap, nothing
+        with contextlib.suppress(curses.error):
+            if k == curses.KEY_MOUSE:
+                _, x, y, _, b = curses.getmouse()
+                k = next((key for y0, x0, x1, key in s.spans.get("job", ()) if y == y0 and x0 <= x < x1 and b & CLICK), k)
+        return k
 
     def idle(s):
         signal.setitimer(signal.ITIMER_REAL, 0)
-        s.working = None
-
-    def spin(s, *_):  # SIGALRM: Python runs this between curses calls, never inside one; skip mid-frame
-        if s.working and not s.drawing:
-            s.spun += 1
-            s.paint_work()
-            s.scr.refresh()
+        s.job = None
 
     @contextlib.contextmanager
     def still(s):  # no spinner while someone types: prompts, or the terminal handed to ssh/an editor
@@ -296,7 +366,7 @@ class App:
         try:
             yield
         finally:
-            if s.working:
+            if s.job:
                 signal.setitimer(signal.ITIMER_REAL, 0.12, 0.12)
 
     def tty(s, fn, *a, **k):  # hand the terminal over (prompts, pinentry, editors, shells), take it back
@@ -317,28 +387,27 @@ class App:
     def fsfor(s, h):  # one Remote per destination: both panes on one host share its session
         return s.local if h is LOCAL else s.remotes.setdefault(h["host"], Remote(h, s.tty, s.busy))
 
-    def ticker(s, label, total):  # progress in the activity panel: how far, how fast, how long still
-        last, seen, rate, pos = time.monotonic(), 0, None, {}
+    def ticker(s, label, total):  # progress: how far, how fast, how long still
+        last, seen, rate, pos = s.clock(), 0, None, {}
 
         def tick(path, at, resumed=False):  # resumed: bytes found already there, not moved now
             nonlocal last, seen, rate
             step, pos[path] = at - pos.get(path, 0), at
             tick.done += step
             tick.moved += 0 if resumed else step
-            now = time.monotonic()
+            now = s.clock()
             if now - last > 0.25:  # speed: a moving average over ~5 s of time (chunks come unevenly), so the time
                 got, w = (tick.moved - seen) / (now - last), 1 - math.exp((last - now) / 5)  # left follows the link
                 rate, last, seen = got if rate is None else rate + w * (got - rate), now, tick.moved
-                pct = f" {tick.done * 100 // total}%" if total else ""
-                eta = f"  {dur((total - tick.done) / rate)} left" if total and rate else ""  # nothing moved: no guess
-                files = f"  {len(tick.finished)} files" if tick.finished else ""
-                s.busy(f"{label}  {human(tick.done)}{f' of {human(total)}' if total else ''}{pct}{eta}  {human(rate)}/s"
-                       f"{files}  Esc stops")
+                eta = f"   {dur((total - tick.done) / rate)} left" if total and rate else ""  # nothing moved: no guess
+                files = f"   {many(len(tick.finished), 'file')}" if tick.finished else ""
+                s.busy(label, tick.done / total if total else None,
+                       f"{human(tick.done)}{f' of {human(total)}' if total else ''}   {human(rate)}/s{eta}{files}")
         tick.done, tick.moved, tick.finished, tick.skipped = 0, 0, set(), []
         return tick
 
-    def xfer(s, fn, label, total, fss):  # fn(tick) over file systems fss; a dropped link reconnects and resumes
-        tick, fails, seen, t0 = s.ticker(label, total), 0, 0, time.monotonic()
+    def xfer(s, fn, label, total, fss):  # fn(tick) over file systems fss -> its numbers; a lost link reconnects, resumes
+        tick, fails, seen, t0 = s.ticker(label, total), 0, 0, s.clock()
         s.busy(label)
         while True:
             try:
@@ -351,12 +420,12 @@ class App:
             fails, seen = (1 if tick.done > seen else fails + 1), tick.done  # progress since the last drop resets it
             if fails > 5:
                 raise err
-            s.msg = f"✗ {label}: link lost ({err})"
-            s.busy(f"{label}: reconnecting in {min(2 ** fails, 20)}s, then resuming")
+            s.msg = f"✗ {label}: connection lost ({err})"
+            s.busy(label, None, f"connection lost, retrying in {min(2 ** fails, 20)}s")
             time.sleep(min(2 ** fails, 20))
-        n, took = f", {len(tick.finished)} files" if len(tick.finished) > 1 else "", time.monotonic() - t0
+        n, took = f", {many(len(tick.finished), 'file')}" if len(tick.finished) > 1 else "", s.clock() - t0
         speed = f", {human(tick.moved / took)}/s" if took >= 1 else ""
-        s.msg = f"✓ {label}  {human(tick.done)}{n} in {dur(took)}{speed}"
+        return f"  {human(tick.done)}{n} in {dur(took)}{speed}"
 
     # --- moving around ---
     def ls(s, p, d, keep=None, record=True):  # list folder d in pane p; keep: a name for the cursor; record: history
@@ -436,7 +505,7 @@ class App:
         d = tempfile.mkdtemp()  # a link: what it points to, not a copy of the link
         lp = os.path.join(d, name.rsplit("/", 1)[-1])
         try:
-            s.xfer(lambda t: copy(p.fs, join(p.cwd, name), s.local, lp, t, follow=True), f"↓ {name}",
+            s.xfer(lambda t: copy(p.fs, join(p.cwd, name), s.local, lp, t, follow=True), f"fetching {name}",
                    (a.get("dest") or a).get("size"), [p.fs])
         except BaseException:
             shutil.rmtree(d, ignore_errors=True)
@@ -493,7 +562,7 @@ class App:
     def history(s, src, dst):  # one step through a pane's history: the folder there, on its host
         p = s.folder()
         if not src:
-            raise OSError("no further")
+            raise OSError("end of history")
         h, d = src.pop()
         dst.append(p.here())
         s.open_host(p, h, d, record=False) if h is not p.host or p.up else s.ls(p, d, record=False)
@@ -513,7 +582,7 @@ class App:
     def mirror(s):  # the other pane to this folder
         p = s.folder()
         if p.up:
-            raise OSError("not from inside an archive")
+            raise OSError("not supported in an archive")
         s.open_host(s.O, p.host, p.cwd)
 
     def swap(s):
@@ -525,7 +594,7 @@ class App:
 
     def find(s):  # ^F: names like a pattern, anywhere below this folder; the results become the pane's listing
         p = s.folder()
-        pat = s.ask("find names like:", "*")
+        pat = s.ask("find pattern:", "*")
         if not pat:
             return
         found = []
@@ -534,12 +603,12 @@ class App:
                 if fnmatch.fnmatch(rel.rsplit("/", 1)[-1], pat):
                     found.append((rel, a))
                     if len(found) % 50 == 0:
-                        s.busy(f"find {pat}: {len(found)}  Esc stops")
+                        s.busy(f"find {pat}", None, f"{len(found)} found")
         except KeyboardInterrupt:
-            s.msg = f"✗ find stopped: {len(found)} so far"
+            s.msg = f"✗ find {pat}: stopped, {len(found)} found"
         p.items, p.found, p.marks, p.files.sel, p.files.top = [("..", None), *found], pat, set(), 0, 0
         s.sync(p)
-        s.msg = s.msg or f"✓ {len(found)} like {pat}: Esc goes back"
+        s.msg = s.msg or f"✓ find {pat}: {len(found)} found"
 
     def search(s):  # filter this view: type to narrow, arrows move; ⏎ applies (never opens), Esc clears
         p = s.P
@@ -628,7 +697,7 @@ class App:
 
     def markpat(s, plus=True):  # every shown entry whose name matches a pattern like *.log
         p = s.folder()
-        pat = s.ask(f"{'mark' if plus else 'unmark'} names like:", "*")
+        pat = s.ask(f"{'mark' if plus else 'unmark'} pattern:", "*")
         hit = {n for n, a in p.files.rows if a and fnmatch.fnmatchcase(n, pat)} if pat else set()
         p.marks = p.marks | hit if plus else p.marks - hit
 
@@ -638,9 +707,9 @@ class App:
     def compare(s):  # D: marks what's missing in the other pane, or (files) differs in size or is newer here
         p, o = s.folder(), s.O
         if o.mode != "files":
-            raise OSError("the other pane shows no folder")
+            raise OSError("other pane: no directory")
         p.marks = differ(p.items, o.items)
-        s.msg = f"{len(p.marks)} differ: F5 copies them over" if p.marks else "✓ nothing missing or newer here"
+        s.msg = f"{len(p.marks)} differ, marked" if p.marks else "✓ no differences"
 
     # --- files ---
     def info(s):  # i: everything about the entry under the cursor, in the viewer (where a long name wraps whole)
@@ -650,7 +719,7 @@ class App:
             return
         n, a = c
         when = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
-        rows = [("name", n), ("in", f"{p.fs.name}:{p.cwd}"), ("kind", kind(n, a)),
+        rows = [("name", n), ("in", s.where(p)), ("kind", kind(n, a)),
                 ("mode", f"{stat.filemode(a.get('perm', 0))}  {stat.S_IMODE(a.get('perm', 0)):04o}"),
                 ("links", f"{a['nlink']}: the same file under {a['nlink']} names (hard links)"
                  if (a.get("nlink") or 0) > 1 and not isdir(a) and not islink(a) else a.get("nlink")),
@@ -678,7 +747,7 @@ class App:
         name, a = c
         path = join(p.cwd, name)
         if special(a.get("dest") or a):
-            raise OSError(f"{name}: a pipe, socket or device; nothing to open")
+            raise OSError(f"{name}: not a regular file")
         cmd = config.opener(s.c, name) if how == "open" else None
         if cmd:
             return s.external(p, name, a, cmd, False)
@@ -687,11 +756,11 @@ class App:
         size = p.fs.stat(path).get("size", 0)  # as it is now, not as listed
         tool = config.tool(s.c, "edit" if how == "edit" else "view")
         if how == "edit" and not tool and size > HEAD:
-            raise OSError(f"{name} is {human(size)}: more than rshm's editor takes ({human(HEAD)}); [tools] edit can")
+            raise OSError(f"{name}: too large to edit ({human(size)}, limit {human(HEAD)}; see [tools] edit)")
         data = s.contents(p, path, min(size, 8192 if tool else HEAD))  # enough to tell text from binary, or all it shows
         if b"\0" in data[:8192]:  # binary: never to an editor, never to a text tool
             if how == "edit":
-                raise OSError(f"{name} is binary: v shows it")
+                raise OSError(f"{name}: binary file")
             tool = None
         if tool:
             return s.external(p, name, a, tool, how == "edit")
@@ -702,7 +771,8 @@ class App:
             if how != "edit":
                 viewer.view(s.scr, data, title, s.C)
             else:
-                editor.edit(s.scr, data, title, s.C, lambda b: save(p.fs, path, b))
+                editor.edit(s.scr, data, title, s.C, lambda b: s.op("save", f"{name} in {s.where(p)}",
+                                                                    lambda: save(p.fs, path, b)))
         if how == "edit":
             s.relist()
 
@@ -726,12 +796,15 @@ class App:
             t0 = os.stat(lp).st_mtime_ns
             s.term(["sh", "-c", config.cmdline(template, lp)], d)
             if edit and os.stat(lp).st_mtime_ns != t0:
-                try:
-                    s.xfer(lambda t: copy(s.local, lp, p.fs, path, t), f"↑ {name}", os.path.getsize(lp), [p.fs])
-                except BaseException as e:
-                    keep = True
-                    raise OSError(f"not saved ({e or 'stopped'}): your edit is in {lp}") from None
-                s.msg = f"✓ saved {name}"
+                def send():
+                    nonlocal keep
+                    try:
+                        return s.xfer(lambda t: copy(s.local, lp, p.fs, path, t), s.doing, os.path.getsize(lp), [p.fs])
+                    except BaseException as e:
+                        keep = True
+                        why = reason(e) if isinstance(e, OSError) else "stopped"
+                        raise OSError(f"{why}; edit kept in {lp}") from None
+                s.op("save", f"{name} in {s.where(p)}", send)
                 s.relist()
         finally:
             if not keep:
@@ -749,10 +822,10 @@ class App:
         if not items:
             return
         if o.mode != "files":
-            raise OSError("the other pane shows no folder: pick one there (Tab, then Enter on a host)")
+            raise OSError("other pane: no directory")
         if move and isinstance(p.fs, Archive):
-            raise OSError("an archive is read-only: copy out of it (F5) instead")
-        what = items[0][0] if len(items) == 1 else f"{len(items)} entries"
+            raise OSError("read-only archive")
+        what = entries(items)
         dst = s.ask(f"{'move' if move else 'copy'} {what} to {o.fs.name}:", o.cwd, o.fs, o.cwd)
         if not dst:
             return
@@ -766,69 +839,73 @@ class App:
         elif len(items) == 1 and not at:  # a new name for the one entry
             there, pairs = {}, [(items[0][0], items[0][1], dst)]
         else:
-            raise OSError(f"{dst}: not a folder")
+            raise OSError(f"{dst}: not a directory")
         same = o.fs is p.fs
         if same:  # by real paths: "a/../b" or a link into the tree mustn't get past these
             real = lambda t: join(o.fs.realpath(posixpath.dirname(t)), posixpath.basename(t))
             src = {n: p.fs.realpath(join(p.cwd, n)) for n, _, _ in pairs}
             pairs = [x for x in pairs if real(x[2]) != src[x[0]]]  # onto itself: nothing to do
             if any(real(t).startswith(src[n] + "/") for n, _, t in pairs):
-                raise OSError("a folder can't go inside itself")
+                raise OSError("cannot copy a directory into itself")
         if not pairs:
-            raise OSError("that is where it already is")
+            raise OSError("source and destination are the same")
         if len({t for *_, t in pairs}) < len(pairs):  # find results from different folders, one name
-            raise OSError("two of these have the same name: they'd land on each other")
+            raise OSError("duplicate names in selection")
         clash = {n for n, _, t in pairs if t.rsplit("/", 1)[-1] in there}
-        if clash and not s.confirm(f"{len(clash)} already there ({min(clash)}…): overwrite, merging folders? (y/N)"):
+        more = f" and {len(clash) - 1} more" if len(clash) > 1 else ""
+        if clash and not s.confirm(f"overwrite {min(clash)}{more} (directories merge)? (y/N)"):
             return
         kept, names = [], {n for n, _, _ in pairs}  # kept: moved trees holding pipes, sockets or devices stay
-        try:
+
+        def body():
             if move and same:  # one file system: a rename, nothing travels; only a folder merge needs copies
                 for n, a, t in [x for x in pairs if not (x[0] in clash and isdir(x[1]))]:
-                    s.busy(f"moving {n}")
+                    s.busy(s.doing, None, n)
                     p.fs.rename(join(p.cwd, n), t)
                     pairs.remove((n, a, t))
-            if pairs:
-                total = s.measure(p.fs, p.cwd, [(n, a) for n, a, _ in pairs])[0]  # ponytail: one listing pass first, for
-                # a whole to measure progress and time left against; incremental counting if huge trees make it wait
-                gone = set()  # moved entries already removed at the source: a retry skips them
+            if not pairs:
+                return ""
+            total = s.measure(p.fs, p.cwd, [(n, a) for n, a, _ in pairs])[0]  # ponytail: one listing pass first, for
+            # a whole to measure progress and time left against; incremental counting if huge trees make it wait
+            gone = set()  # moved entries already removed at the source: a retry skips them
 
-                def run(tick):
-                    for n, a, t in pairs:
-                        if n not in gone:
-                            skips = len(tick.skipped)
-                            copy(p.fs, join(p.cwd, n), o.fs, t, tick)
-                            if move and len(tick.skipped) > skips:
-                                kept.append(n)
-                            elif move:
-                                rm(p.fs, join(p.cwd, n))
-                            gone.add(n)
-                s.xfer(run, f"{'→' if s.focus == 0 else '←'} {what}", total, [p.fs, o.fs])
-            s.msg = s.msg or f"✓ moved {what}"
-            if kept:
-                s.msg += f"; kept {', '.join(kept)} here: pipes, sockets or devices in it don't travel"
+            def run(tick):
+                for n, a, t in pairs:
+                    if n not in gone:
+                        skips = len(tick.skipped)
+                        copy(p.fs, join(p.cwd, n), o.fs, t, tick)
+                        if move and len(tick.skipped) > skips:
+                            kept.append(n)
+                        elif move:
+                            rm(p.fs, join(p.cwd, n))
+                        gone.add(n)
+            return s.xfer(run, s.doing, total, [p.fs, o.fs]) + \
+                (f"; {', '.join(kept)} kept (contains pipes, sockets or devices)" if kept else "")
+        try:
+            s.op("move" if move else "copy", f"{what} to {o.fs.name}:{dst}", body)
         finally:
             p.marks -= names
             s.relist()
 
     def mkdir(s):
         p = s.folder()
-        name = s.ask("new folder:", "", p.fs, p.cwd).strip("/")
+        name = s.ask("mkdir:", "", p.fs, p.cwd).strip("/")
         if name:
-            p.fs.mkdir(join(p.cwd, name))
+            s.op("mkdir", f"{name}/ in {s.where(p)}", lambda: p.fs.mkdir(join(p.cwd, name)))
             s.ls(p, p.cwd, keep=name.split("/")[0])
 
     def delete(s):
         p = s.folder()
         items = p.targets()
-        what = items[0][0] + ("/" if isdir(items[0][1]) else "") if len(items) == 1 else f"{len(items)} entries"
+        what = entries(items)
         if items and s.confirm(f"delete {what}? (y/N)"):
-            try:
+            def body():
                 for n, _ in items:
-                    s.busy(f"deleting {n}")
+                    s.busy(s.doing, None, n)
                     rm(p.fs, join(p.cwd, n))
                     p.marks.discard(n)
-                s.msg = f"✓ deleted {what}"
+            try:
+                s.op("delete", f"{what} in {s.where(p)}", body)
             finally:
                 s.relist()  # show what's left even if it stopped halfway
 
@@ -841,20 +918,21 @@ class App:
         if new and new != c[0]:
             dst = new if new.startswith("/") else join(p.cwd, new)
             dst = join(dst, c[0]) if new.endswith("/") else dst
-            p.fs.rename(join(p.cwd, c[0]), dst, replace=False)
+            s.op("rename", f"{c[0]} to {new} in {s.where(p)}",
+                 lambda: p.fs.rename(join(p.cwd, c[0]), dst, replace=False))
             s.ls(p, p.cwd, keep=new)
-            s.msg = f"✓ renamed {c[0]} to {new}"
 
     def symlink(s):  # L: a symlink to the entry under the cursor, where you say; on a link: where it points, changed
         p = s.folder()
         c = p.cur()
         if c and c[1] and islink(c[1]):
             path = join(p.cwd, c[0])
-            to = s.ask("points to:", c[1]["target"], p.fs, p.cwd)
-            if to and to != c[1]["target"]:  # the new link beside the old, then over it: never neither
-                p.fs.symlink(to, path + PART)
-                p.fs.rename(path + PART, path)
-                s.msg = f"✓ {c[0]} -> {to}"
+            to = s.ask("link target:", c[1]["target"], p.fs, p.cwd)
+            if to and to != c[1]["target"]:
+                def swap():  # the new link beside the old, then over it: never neither
+                    p.fs.symlink(to, path + PART)
+                    p.fs.rename(path + PART, path)
+                s.op("link", f"{c[0]} -> {to} in {s.where(p)}", swap)
                 s.relist()
         else:
             s.link("symlink")
@@ -869,18 +947,17 @@ class App:
             return
         o, name, src = s.O, posixpath.basename(c[0]), join(p.cwd, c[0])
         here = o.cwd if o.mode == "files" and o.fs is p.fs and not o.found else p.cwd  # one file system only
-        at = s.ask(f"{kind} to {name} at:", join(here, name), p.fs, p.cwd)
+        at = s.ask(f"{kind} {name} as:", join(here, name), p.fs, p.cwd)
         if not at:
             return
         at = s.path(p, at)
         at = join(p.fs.realpath(posixpath.dirname(at)), posixpath.basename(at))
+        d, new = posixpath.split(at)
         if kind == "symlink":  # relative: it still points right when the tree moves or is mounted elsewhere
-            to = posixpath.relpath(src, posixpath.dirname(at))
-            p.fs.symlink(to, at)
-            s.msg = f"✓ {at} -> {to}"
+            to = posixpath.relpath(src, d)
+            s.op("link", f"{new} -> {to} in {p.fs.name}:{d}", lambda: p.fs.symlink(to, at))
         else:
-            p.fs.hardlink(src, at)
-            s.msg = f"✓ {at}: another name for {name}"
+            s.op("link", f"{new} to {src} in {p.fs.name}:{d}", lambda: p.fs.hardlink(src, at))
         s.relist()
 
     def owner_id(s, p, key, name):  # a user or group name as its number: on a host, as its files show it
@@ -892,7 +969,7 @@ class App:
             with contextlib.suppress(KeyError):
                 found = pwd.getpwnam(name).pw_uid if key == "uid" else grp.getgrnam(name).gr_gid
         if found is None:
-            raise OSError(f"{name}: no {what} by that name here; its number works")
+            raise OSError(f"{name}: no such {what}")
         return found
 
     def chattr(s):  # A: mode, owner, time of the marked entries (or the one under the cursor); what you change, changes
@@ -914,20 +991,21 @@ class App:
                 try:
                     ch |= read(v.strip())
                 except ValueError:
-                    raise OSError(f"{label} {v.strip()}: not like {shown}") from None
+                    raise OSError(f"invalid {label}: {v.strip()} (as in {shown})") from None
                 done.append(f"{label} {v.strip()}")
         if ch:
-            for n, _ in items:
-                p.fs.chattr(join(p.cwd, n), ch)
+            def apply():
+                for n, _ in items:
+                    p.fs.chattr(join(p.cwd, n), ch)
+            s.op("change", f"{entries(items)} in {s.where(p)}: {', '.join(done)}", apply)
             s.relist()
-            s.msg = f"✓ {', '.join(done)}"
 
     def size(s):  # z: the size of the marked entries, or of the one under the cursor (a folder: all inside it)
         p = s.folder()
         items = p.targets()
         total, files = s.measure(p.fs, p.cwd, items)
         if items:
-            s.msg = f"{items[0][0] if len(items) == 1 else f'{len(items)} entries'}: {human(total)} in {files} files"
+            s.msg = f"{items[0][0] if len(items) == 1 else many(len(items), 'item')}: {human(total)} in {many(files, 'file')}"
 
     def measure(s, fs, d, items):  # (bytes, files) of the files in items (in folder d), trees counted all through:
         total = files = 0               # what a copy of them moves; Esc stops the count
@@ -936,7 +1014,7 @@ class App:
                 if stat.S_ISREG(b.get("perm", 0)):
                     total, files = total + b.get("size", 0), files + 1
                 if i % 200 == 0:
-                    s.busy(f"counting {n}: {human(total)}, {files} files  Esc stops")
+                    s.busy(s.doing or f"counting {n}", None, f"{human(total)} in {many(files, 'file')} so far")
         return total, files
 
     # --- commands ---
@@ -980,20 +1058,20 @@ class App:
         try:
             connect(h, s.tty, s.busy, timeout=3, ask=False)
         except ConnectionError as e:
-            raise OSError(f"{h['host']} unreachable: {e}" if unreachable(str(e)) else
-                          f"{h['host']} answers, but wants a login: Enter on it logs in") from None
-        s.busy(f"live check {h['host']}")
+            raise OSError(f"{h['host']}: unreachable ({e})" if unreachable(str(e)) else
+                          f"{h['host']}: up, login required") from None
+        s.busy(f"checking {h['host']}")
         t0 = time.monotonic()
         rc, err = quiet([*argv(h, batch=True, timeout=3), h["host"], "true"])
         if rc:
             raise OSError(f"{h['host']}: {err}")
-        s.msg = f"✓ {h['host']} answers ({(time.monotonic() - t0) * 1000:.0f} ms)"
+        s.msg = f"✓ {h['host']}: up ({(time.monotonic() - t0) * 1000:.0f} ms)"
 
     # --- options ---
     def theme(s):  # t: the themes this terminal can show; the pick is saved (no config: this session only)
         names = [n for n in THEMES if s.can(n)]
         if not names:
-            raise OSError(f"no theme to pick: {s.lack()}")
+            raise OSError(f"no themes: {s.lack()}")
         i = s.choose([(n, "✓" if n == s.shown else "") for n in names], title="theme")
         if isinstance(i, int):
             s.set_theme(names[i])
@@ -1008,7 +1086,8 @@ class App:
             s.term(["sh", "-c", config.cmdline(cmd, str(s.cfg))])
         else:
             with s.still():
-                editor.edit(s.scr, s.cfg.read_bytes(), str(s.cfg), s.C, lambda b: save(s.local, str(s.cfg), b))
+                editor.edit(s.scr, s.cfg.read_bytes(), str(s.cfg), s.C, lambda b: s.op(
+                    "save", f"{s.cfg.name} in local:{s.cfg.parent}", lambda: save(s.local, str(s.cfg), b)))
         s.load()
 
     def logscroll(s, d=None):  # [ older, ] newer (and the wheel over the log)
@@ -1185,22 +1264,51 @@ class App:
         s.scr.clear()
 
     def paint(s):  # this frame, from the state; the spinner keeps off while it's drawn
-        s.drawing = True
+        s.drawing, s.spans["job"] = True, []
         try:
             s.frame()
+            if s.job and s.long():
+                s.paint_job()
         finally:
             s.drawing = False
 
-    def paint_work(s):  # the live line at the bottom of the activity panel: spinner, what, how long
+    def paint_job(s):  # the box over the screen: what runs, centred on top; its bar (its time, while the size is unknown)
+        what, done, numbers = s.job  # and numbers; under a rule, its two buttons
         H, W = s.scr.getmaxyx()
-        if s.working and layout(H, W):
-            line = f" {SPIN[s.spun % len(SPIN)]} {s.working}  {time.monotonic() - s.t0:.0f}s"
-            with contextlib.suppress(curses.error):
-                s.scr.addstr(H - 2, 0, fit(line, W - 1), s.C["acc"] | curses.A_BOLD)
+        w = max(min(64, W - 4), 16)
+        buttons = [(f"[ Space {'resume' if s.paused else 'pause'} ]", 32), ("[ Esc stop ]", 27)]
+        if sum(cells(b) + 3 for b, _ in buttons) > w - 2:  # a narrow screen: the keys alone
+            buttons = [("[ Space ]", 32), ("[ Esc ]", 27)]
+        rows = 1 + bool(numbers)
+        y, x = max((H - rows - 4) // 2, 0), max((W - w) // 2, 0)
+        by, bx = y + rows + 2, x + (w - sum(cells(b) + 3 for b, _ in buttons) + 3) // 2
+        A, N = s.C["acc"], s.C["norm"]
+        with contextlib.suppress(curses.error):  # a terminal too small for the box: what fits shows
+            title = f" {fit(what, w - 6).rstrip()} "
+            left = (w - 2 - cells(title)) // 2
+            s.scr.addstr(y, x, f"┌{'─' * left}{title}{'─' * (w - 2 - left - cells(title))}┐", A | curses.A_BOLD)
+            for r in range(1, rows + 3):
+                s.scr.addstr(y + r, x, f"├{'─' * (w - 2)}┤" if r == rows + 1 else f"│{' ' * (w - 2)}│", A)
+            s.scr.addstr(y + 1, x + 2, s.turn(), A | curses.A_BOLD)
+            if done is None:
+                s.scr.addstr(y + 1, x + 4, dur(time.monotonic() - s.since), N)
+            else:
+                n = w - 11
+                full = round(done * n)
+                s.scr.addstr(y + 1, x + 4, "█" * full, A)
+                s.scr.addstr(y + 1, x + 4 + full, "░" * (n - full), s.C["dim"])
+                s.scr.addstr(y + 1, x + 4 + n, f" {done:4.0%}", N)
+            if numbers:
+                s.scr.addstr(y + 2, x + 4, fit(numbers, w - 6), N)
+            for b, k in buttons:
+                s.scr.addstr(by, bx, b, s.C["sel"])
+                s.spans["job"].append((by, bx, bx + cells(b), k))
+                bx += cells(b) + 3
+            s.scr.addstr(by + 1, x, f"└{'─' * (w - 2)}┘", A)
 
     def title(s, i, p, w):  # which pane, and what it shows: its host and folder, the host list, an archive, a find
-        where = "hosts" if p.mode == "hosts" else f"find {p.found} in {p.fs.name}:{p.cwd}" if p.found \
-            else f"{p.fs.name}:{p.cwd}"
+        where = "hosts" if p.mode == "hosts" else f"find {p.found} in {s.where(p)}" if p.found \
+            else s.where(p)
         right = "".join(x for x in (f" [{len(p.marks)}]" if p.marks and p.mode == "files" else "",
                                     f" /{p.v.flt}" if p.v.flt else "",
                                     f" {human(p.free)} free" if p.free is not None and p.mode == "files" else "",
@@ -1279,8 +1387,9 @@ class App:
             spans.append((x, x + slot, m))
         s.spans["fbar"] = spans
 
-    def note(s, text):  # a line in the log, timed
+    def note(s, text):  # a line in the log, timed; the log follows it
         s.log.append(f"{time.strftime('%H:%M:%S')} {text}")
+        s.logoff = 0
 
     def frame(s):
         sc = s.scr
@@ -1293,7 +1402,7 @@ class App:
                 s.note("one pane: Tab swaps")
         if s.msg:  # every message lands in the log, which follows the newest
             s.note(s.msg)
-            s.msg, s.logoff = "", 0
+            s.msg = ""
         if not fit_:
             return sc.addstr(0, 0, fit(f"too small: {W}×{H}, needs {MIN_W}×{MIN_H}", W - 1))
         rects, logn = fit_
@@ -1315,12 +1424,14 @@ class App:
             side = len(s.rects) == 2 and s.rects[1][2]  # side by side: where the separator meets the border
             if side and side >= text:
                 sc.addstr(A, side, "┴", s.C["dim"])
-            log = list(s.log)
-            keep = logn - bool(s.working)  # the live line, when there is one, takes the last row
+            log, live = list(s.log), bool(logn and s.job and s.long())  # live: what runs, as the log's newest line
+            keep = logn - live
             shown = log[max(0, len(log) - keep - s.logoff):len(log) - s.logoff] if keep else []
             for k, ln in enumerate(shown):
                 s.paint_log(A + 1 + k, ln, W)
-            s.paint_work()
+            if live:
+                what, _, numbers = s.job
+                s.paint_log(H - 2, f"{time.strftime('%H:%M:%S')} {s.turn()} {what}{f'  {numbers}' * bool(numbers)}", W)
             if s.typing:
                 hint = "Enter apply  Esc clear" if s.typing == "/" else ""
                 q = f" / {s.P.v.flt}" if s.typing == "/" else f" {s.typing}"
@@ -1334,13 +1445,19 @@ class App:
         try:
             fn(*a)
         except KeyboardInterrupt:  # Ctrl-C mid-action cancels just the action
-            s.msg = "✗ stopped"
+            what = s.doing or s.job and s.job[0]
+            s.msg = f"✗ {what}: stopped" if what else "✗ stopped"
         except Exception as e:
-            s.msg = f"✗ {e}" if isinstance(e, OSError) else f"✗ {type(e).__name__}: {e}"
+            s.msg = f"✗ {reason(e)}" if isinstance(e, OSError) else f"✗ {type(e).__name__}: {e}"
         finally:
             s.idle()
-            if time.monotonic() - t0 > 0.5:
-                curses.flushinp()  # keys hit while a long action ran shouldn't fire now
+            s.doing = None
+            ahead, s.ahead = s.ahead, []
+            if time.monotonic() - t0 > LONG:
+                curses.flushinp()  # keys hit while a long action ran shouldn't fire now; after a short one, they do
+            else:
+                for k in reversed(ahead):
+                    curses.ungetch(k)
 
     def loop(s, start=()):  # start: host paths; one opens in the right pane, two in both
         if not start:

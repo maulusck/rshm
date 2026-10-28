@@ -1,10 +1,13 @@
 """SFTP v3 (draft-ietf-secsh-filexfer-02), the version every server speaks, over `ssh -s host sftp`."""
-import re, struct, subprocess, tempfile
+import errno, os, re, struct, subprocess, tempfile
 from collections import deque
 
 from .ssh import argv, last
 
 CHUNK, WINDOW = 32768, 64  # what OpenSSH's sftp uses: 2 MB in flight, and every server accepts 32 KB
+
+
+FX = {2: errno.ENOENT, 3: errno.EACCES, 8: errno.EOPNOTSUPP}  # SFTP v3 status -> errno
 
 
 def pack(*xs):  # ints -> uint32, str/bytes -> length-prefixed string; str round-trips raw bytes
@@ -25,7 +28,7 @@ class Reader:
     def take(r, n):
         r.i += n
         if r.i > len(r.d):
-            raise OSError("SFTP: a packet cut short")
+            raise OSError("sftp: truncated packet")
         return r.d[r.i - n:r.i]
 
     def u32(r):
@@ -144,8 +147,11 @@ class SFTP:  # one session on the host's master: no remote shell, exact byte nam
         if rt != 101:  # anything but STATUS
             return r
         code = r.u32()
-        if code > 1:
-            raise OSError(r.str().decode(errors="replace") or f"SFTP status {code}")
+        if code in FX:  # as this machine says it: one wording for every error, here or there
+            raise OSError(FX[code], os.strerror(FX[code]))
+        if code > 1:  # 4, FAILURE: what OpenSSH answers for every other errno, reason unsaid
+            raise OSError("failed on the server (SFTP gives no reason: disk full, quota, read-only?)" if code == 4
+                          else r.str().decode(errors="replace") or f"SFTP status {code}")
 
     def forget(s, ids):  # requests nobody will wait for: their replies, here or still coming, are dropped
         for i in ids:
@@ -223,7 +229,7 @@ class SFTP:  # one session on the host's master: no remote shell, exact byte nam
 
     def hardlink(s, src, p):
         if b"hardlink@openssh.com" not in s.ext:
-            raise OSError("this server can't make hard links")
+            raise OSError("server does not support hard links")
         s.make(p, 200, "hardlink@openssh.com", src, p)
 
     def free(s, p):  # bytes free for you there, None if the server won't say

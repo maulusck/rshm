@@ -2,7 +2,7 @@
 """The hard proof, seeded so any failure replays (RSHM_SEED=n): random trees copied every way and held against
 cp -a; text, editor, viewer, wire and config fuzzed; and faults: the link dropped before any reply, ^C before any
 reply, a full disk, a source that shrinks mid-copy. Against a real sftp-server, no network, no sshd."""
-import hashlib, os, random, shutil, stat, subprocess, sys, tempfile
+import hashlib, os, random, re, shutil, stat, subprocess, sys, tempfile
 from pathlib import Path
 
 from rshm import config, edit, fs, screen, sftp, ui, view
@@ -244,7 +244,7 @@ print(f"differential ok ({kinds})")
 
 # --- the link drops before reply n, any n, again and again: the transfer reconnects, resumes, ends exact ---
 class App:  # what App.xfer needs of the app around it
-    msg, busy, ticker, xfer = "", lambda s, what: None, ui.App.ticker, ui.App.xfer
+    msg, held, busy, clock, ticker, xfer = "", 0.0, lambda s, *a: None, ui.App.clock, ui.App.ticker, ui.App.xfer
 
 
 ui.time.sleep = lambda n: None
@@ -267,9 +267,9 @@ for name, mk in (("up", lambda: (Lo, remote())), ("down", lambda: (remote(), Lo)
         FAULT["n"], FAULT["do"] = 0, "drop"
         FAULT["at"] = set(rnd.sample(range(2, clean), min(rnd.randrange(1, 5), clean - 2)))
         app = App()
-        app.xfer(lambda t: fs.copy(a, str(src), b, str(d / "out"), t), name, None, [a, b])
+        said = app.xfer(lambda t: fs.copy(a, str(src), b, str(d / "out"), t), name, None, [a, b])
         assert sig(d / "out") == want and not list((d / "out").rglob("*" + fs.PART)), (name, run, FAULT)
-        assert app.msg.startswith("✓"), app.msg
+        assert re.fullmatch(r"  \S+(, \d+ files)? in \S+(, \S+/s)?", said), said
         wipe(d / "out")
         a.close(), b.close()
 FAULT["at"] = set()
@@ -282,13 +282,13 @@ def refuse(*a):
 
 
 fs.connect, app = refuse, App()
-app.busy = lambda what: app.said.append(what)
+app.busy = lambda what, done=None, numbers="": app.said.append(numbers)
 app.said, r = [], fs.Remote({"host": "test"}, None, None)
 try:
     app.xfer(lambda t: fs.copy(Lo, str(src / "blob"), r, str(d / "x"), t), "x", None, [r])
     raise AssertionError("a dead host succeeded")
 except OSError as e:
-    assert "refused" in str(e) and sum("reconnecting" in w for w in app.said) == 5, (e, app.said)
+    assert "refused" in str(e) and sum("retrying" in w for w in app.said) == 5, (e, app.said)
 fs.connect = lambda *a: None
 
 # a drop before any reply of a lookup: the right answer or an error, never "nothing there"
@@ -427,7 +427,7 @@ try:
     App().xfer(lambda t: fs.copy(Lo, str(src / "blob"), r, str(d / "out" / "blob"), t), "full", None, [r])
     raise AssertionError("a full disk took the file")
 except OSError as e:
-    assert r.alive() and ("Failure" in str(e) or "large" in str(e)), e
+    assert r.alive() and ("failed on the server" in str(e) or "large" in str(e)), e
 assert (d / "out" / "blob").read_bytes() == old and (d / "out" / ("blob" + fs.PART)).stat().st_size <= 1 << 20
 r.close()
 LIMIT[:] = []

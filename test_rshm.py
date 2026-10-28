@@ -63,7 +63,7 @@ assert cp(H["web"]) != cp(H["db"]) and cp(H["web"]) == cp({"host": "deploy@web.e
 assert len(cp(H["web"])) - len("ControlPath=") - len(str(Path.home())) == len("/.ssh/rshm-") + 16
 r = fs.Remote(H["web"], None, None)
 r.login = lambda: None
-assert r.run("ls", "/s rv")[0][-3:] == ["-t", "deploy@web.example.com", "cd '/s rv' && ls"]
+assert r.run("ls", "/s rv")[0][-3:] == ["-t", "deploy@web.example.com", "exec sh -c 'cd '\"'\"'/s rv'\"'\"' && ls'"]
 assert fs.Local().run("ls", "/tmp") == (["sh", "-c", "ls"], "/tmp")
 
 # network failures (retry, don't prompt) vs refusals (a terminal login may help), as OpenSSH words them
@@ -91,7 +91,7 @@ if tomllib:
     except OSError as e:
         assert str(e).startswith("bad.toml: ") and config.unread(d / "bad.toml") == ""
 else:  # no TOML here: the config is left unread, and said why; no config at all says nothing
-    assert inc == {} and config.unread(d / "inc.toml").startswith("inc.toml is read from Python 3.11 on (this is 3.")
+    assert inc == {} and config.unread(d / "inc.toml").startswith("inc.toml: ignored, needs Python 3.11 (this is 3.")
 assert config.unread(d / "none.toml") == ""
 os.environ["XDG_CONFIG_HOME"] = str(d)
 assert config.locate() == d / "rshm.toml"
@@ -138,6 +138,15 @@ assert sftp.pack(7, name) == b"\x00\x00\x00\x07\x00\x00\x00\x05" + raw
 rd = sftp.Reader(sftp.pack(0x80000000 | 0xF) + (1536).to_bytes(8, "big") + sftp.pack(1, 2, 0o40755, 3, 4, 1, "k", "v", 9))
 assert rd.attrs() == {"size": 1536, "uid": 1, "gid": 2, "perm": 0o40755, "mtime": 4} and rd.u32() == 9 and fs.isdir({"perm": 0o40755})
 assert fs.islink({"perm": 0o120777}) and not fs.isdir({"perm": 0o120777})
+one = object.__new__(sftp.SFTP)  # a server's refusal, in this machine's words: as a local error, or the bare fact
+for code, text, want in ((2, "No such file", FileNotFoundError), (3, "Permission denied", PermissionError),
+                         (4, "Failure", "failed on the server (SFTP gives no reason"), (5, "Bad message", "Bad message")):
+    one.early = {1: (101, sftp.Reader(sftp.pack(code, text, "")))}
+    try:
+        one.wait(1)
+        raise AssertionError("a refusal taken for an answer")
+    except OSError as e:
+        assert type(e) is want if isinstance(want, type) else str(e).startswith(want), (code, e)
 
 # screen helpers: keys, sizes; hostile names can't drive the terminal
 assert ui.codes("x Del") == [ord("x"), curses.KEY_DC] and 10 in ui.codes("Enter") and ui.codes("F5 c") == [curses.KEY_F5, 99]
@@ -152,12 +161,37 @@ assert ui.lcwd() == str(Path.home())
 bound = [c for _, keys, _, m in ui.KEYS if m for c in ui.codes(keys)]
 assert len(bound) == len(set(bound)) and all(callable(getattr(ui.App, m, None)) for *_, m in ui.KEYS if m)
 assert [f"F{n} {w}" for n, w, _ in ui.fkeys()] == ["F1 help", "F2 menu", "F3 view", "F4 edit", "F5 copy", "F6 move",
-                                                  "F7 mkdir", "F8 delete", "F9 bar", "F10 quit"]  # mc's ten, mc's order
+                                                  "F7 mkdir", "F8 delete", "F9 pulldown", "F10 quit"]  # mc's ten, mc's order
 assert all(ui.menu_rows(m) for m in ui.MENUS) and {r[0] for r in ui.KEYS} - {None} == {"Pane", "File", "Mark", "Command", "Options"}
-assert ui.menu_rows("Pane 1") == ui.menu_rows("Pane 2") and "copy to the other pane" in ui.keys_help()
+assert ui.menu_rows("Pane 1") == ui.menu_rows("Pane 2") and "copy to other pane" in ui.keys_help()
 assert [g for g, _ in ui.grouped()] == ["File", "Mark", "Pane", "Command", "Options", "moving, mouse"]  # help, by menu
 assert sum(len(rows) for _, rows in ui.grouped()) == len(ui.KEYS) and "\n Mark\n   Space Ins" in ui.keys_help()
-assert all(len(th) == len(ui.ROLES) and all(-1 <= c < 256 for x in th for c in x[:2]) for th in ui.THEMES.values())
+
+
+def rgb(i):  # an xterm colour as (r, g, b): the 16 basics, the 6x6x6 cube, the greys
+    basics = [(0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0), (0, 0, 238), (205, 0, 205), (0, 205, 205),
+              (229, 229, 229), (127, 127, 127), (255, 0, 0), (0, 255, 0), (255, 255, 0), (92, 92, 255), (255, 0, 255),
+              (0, 255, 255), (255, 255, 255)]
+    v = [0, 95, 135, 175, 215, 255]
+    return basics[i] if i < 16 else (v[(i - 16) // 36], v[(i - 16) // 6 % 6], v[(i - 16) % 6]) if i < 232 else (8 + 10 * (i - 232),) * 3
+
+
+def contrast(a, b):  # WCAG's ratio, 1 to 21
+    lum = lambda c: sum(k * (x / 255 / 12.92 if x <= 10 else ((x / 255 + 0.055) / 1.055) ** 2.4)
+                        for k, x in zip((0.2126, 0.7152, 0.0722), rgb(c)))
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+for name, th in ui.THEMES.items():  # every theme: the same roles, the same meaning, and readable (the default theme is
+    roles = dict(zip(ui.ROLES, ui.pairs(th)))  # the terminal's own colours: those are the user's to choose)
+    assert len(roles) == len(ui.ROLES) and all(-1 <= c < 256 for x in roles.values() for c in x[:2]), name
+    assert roles["hidden"] == roles["dim"] and roles["file"] == roles["norm"] and roles["stale"][0] == roles["err"][0]
+    assert all(roles[r][2:] == ("b",) for r in ("acc", "err", "dir", "exe", "special", "ok")), name
+    if name != "default":
+        low = [(r, round(contrast(*roles[r][:2]), 1)) for r in ui.ROLES
+               if contrast(*roles[r][:2]) < (3 if r in ("dim", "hidden") else 4.5)]
+        assert not low, (name, low)  # text 4.5:1 at least, faint text 3:1 (WCAG)
 
 # a terminal that isn't UTF-8: told by its locale (the first of LC_ALL, LC_CTYPE, LANG set), not by what Python makes
 for env, utf in (({"LANG": "en_US.UTF-8"}, True), ({"LC_ALL": "C.utf8"}, True), ({"LC_CTYPE": "C.UTF-8"}, True),
@@ -271,10 +305,11 @@ if srv:
     assert (D / "t" / "big.bin").stat().st_mtime == int((L / "big.bin").stat().st_mtime)  # times travel (cp -p)
     fs.copy(Lo, str(L), R, str(D / "t"), seen)  # a reconnect re-walks the tree: finished files aren't sent again
     assert seen.done == len(big) + 1 and len(seen.finished) == 2 and not list(D.rglob("*" + fs.PART))
-    os.chmod(D / "t" / "sub" / "x.txt", 0o600)  # replacing keeps the target's permissions
+    os.chmod(D / "t" / "sub" / "x.txt", 0o600)  # replacing: the source's permissions, not the replaced file's
     (L / "sub" / "x.txt").write_text("new")
+    os.chmod(L / "sub" / "x.txt", 0o640)
     fs.copy(Lo, str(L / "sub" / "x.txt"), R, str(D / "t" / "sub" / "x.txt"), ticker())
-    assert (D / "t" / "sub" / "x.txt").read_text() == "new" and (D / "t" / "sub" / "x.txt").stat().st_mode & 0o777 == 0o600
+    assert (D / "t" / "sub" / "x.txt").read_text() == "new" and (D / "t" / "sub" / "x.txt").stat().st_mode & 0o777 == 0o640
     got = ticker()  # host -> local resumes a partial, never counting resumed bytes twice; restarts a bogus one
     (d / ("dl" + fs.PART)).write_bytes(big[:1_000_000])
     fs.copy(R, str(D / "t" / "big.bin"), Lo, str(d / "dl"), got)
@@ -331,6 +366,11 @@ if srv:
             raise AssertionError("made in a folder that isn't there")
         except OSError as e:
             assert not isinstance(e, FileExistsError), e
+        try:  # a missing file: the same error, the same words, here or over SFTP
+            f.stat(str(D / "nope"))
+            raise AssertionError("a stat of nothing")
+        except FileNotFoundError as e:
+            assert ui.reason(e).endswith("No such file or directory"), e
         f.rename(str(D / "a"), str(D / "b"))
         assert (D / "b").read_text() == "a" and not (D / "a").exists()
     (D / "t" / "rloop").symlink_to(D / "t")  # a host tree back down, with a link loop, a dangling link, a pipe
@@ -393,7 +433,7 @@ if srv:
         R.hardlink(str(D / "b"), str(D / "h2"))
         raise AssertionError("a hard link without the extension")
     except OSError as e:
-        assert "can't make hard links" in str(e)
+        assert "does not support hard links" in str(e)
     s.ext = ext
     assert not hasattr(R, "nope")  # only the primitives are the session's
     (D / "tdir").symlink_to(D / "t")  # Tab: what a typed path can go on to, on this machine or a host alike
@@ -471,7 +511,7 @@ try:
     b"".join(fs.Archive(str(d / "long.zip"), "x").read("/t.txt", 0, 999))
     raise AssertionError("a short entry read as whole")
 except OSError as e:
-    assert "shorter than the archive says" in str(e) or "damaged" in str(e), e
+    assert "truncated in archive" in str(e) or "damaged" in str(e), e
 for name, mode in (("d.tgz", "w:gz"), ("d.txz", "w:xz"), ("d.zip", None)):  # damage: always a clean error
     blob = os.urandom(200_000)
     (d / "f").write_bytes(blob)
@@ -509,7 +549,7 @@ try:
     fs.Archive(str(d / "junk.zip"), "junk.zip")
     raise AssertionError("junk opened")
 except OSError as e:
-    assert "not an archive" in str(e)
+    assert "unreadable archive" in str(e)
 
 # text in cells: wide 2, combining 0; fitted exactly, cut with … at the start (paths, bars) or the middle (names)
 assert screen.cells("a日\u0301") == 3 and screen.span("a日本b", 1, 3) == "日 " and screen.wrap("日本語abc", 4) == ["日本", "語ab", "c"]
@@ -643,10 +683,10 @@ def term(known, cup=True, istty=True, name="xterm-kitty"):  # terminal() with te
 
 
 was = os.environ.get("TERM", "")
-assert term({"xterm-kitty"}) == "" and term({"xterm-256color"}) == "TERM=xterm-kitty is unknown here: drawn as xterm-256color"
-assert os.environ["TERM"] == "xterm-256color" and term(set()).startswith("rshm: no terminfo for TERM=xterm-kitty here")
-assert term({"dumb"}, cup=False, name="dumb") == "rshm needs a terminal that can move its cursor; TERM=dumb can't"
-assert term({"xterm"}, istty=False) == "rshm needs a terminal"
+assert term({"xterm-kitty"}) == "" and term({"xterm-256color"}) == "TERM=xterm-kitty unknown, using xterm-256color"
+assert os.environ["TERM"] == "xterm-256color" and term(set()).startswith("rshm: no terminfo for TERM=xterm-kitty")
+assert term({"dumb"}, cup=False, name="dumb") == "rshm: TERM=dumb cannot address the cursor"
+assert term({"xterm"}, istty=False) == "rshm: not a terminal"
 os.environ["TERM"] = was
 cli.terminal = lambda: ""  # below, main() in this process: no terminal here
 
@@ -666,14 +706,14 @@ cfg = d / "c.toml"
 cfg.write_text('[hosts]\nweb = "w"\nweb2 = "w2"\n')
 assert "no such file" in run("-c", str(d / "none.toml"))[1] and "at most two hosts" in run("a", "b", "c")[1]
 if tomllib:
-    assert "ambiguous host 'we': web, web2" in run("-c", str(cfg), "we")[1] and "no host 'zz'" in run("-c", str(cfg), "zz")[1]
+    assert "ambiguous host 'we': web, web2" in run("-c", str(cfg), "we")[1] and "no such host: 'zz'" in run("-c", str(cfg), "zz")[1]
     assert run("-c", str(cfg), "web")[0] == 0 and run("-c", str(cfg), "web", "web2")[0] == 0
     (d / "bad.toml").write_text("[hosts\n")
     assert "bad.toml" in run("-c", str(d / "bad.toml"), "x")[1]
 else:  # a config asked for by name, on a Python that can't read it: refused, saying why
-    assert "c.toml is read from Python 3.11 on" in run("-c", str(cfg), "web")[1]
+    assert "c.toml: ignored, needs Python 3.11" in run("-c", str(cfg), "web")[1]
 assert run(wrapper=lambda f: (_ for _ in ()).throw(KeyboardInterrupt))[0] == 0  # ^C at the very end: a quiet exit
-assert "needs a terminal" in run(wrapper=lambda f: (_ for _ in ()).throw(curses.error("setupterm")))[1]
+assert "rshm: setupterm" in run(wrapper=lambda f: (_ for _ in ()).throw(curses.error("setupterm")))[1]
 assert run("--pyz", str(d / "r.pyz"))[0] == 0 and os.access(d / "r.pyz", os.X_OK)
 with zipfile.ZipFile(d / "r.pyz") as zf:
     assert {"__main__.py", "rshm/ui.py", "rshm/fs.py"} <= set(zf.namelist()) and b"3, 9" in zf.read("__main__.py")
@@ -710,38 +750,48 @@ except ConnectionError as e:
     assert "denied" in str(e) and handed[-1] == "w" and len(handed) == 6
 ssh.LOGINS.clear()
 
-# progress: how far, how fast, how long still, once a quarter second at most
+# progress: how far (0-1, for the bar), how fast, how long still, once a quarter second at most
 said, clock = [], iter(range(0, 1000, 1))
 ui.time = types.SimpleNamespace(monotonic=lambda: next(clock), strftime=time.strftime, localtime=time.localtime)
-tk = ui.App.ticker(types.SimpleNamespace(busy=said.append), "↑ x", 4096)
+shown = types.SimpleNamespace(busy=lambda what, done=None, numbers="": said.append((what, done, numbers)),
+                              clock=lambda: ui.time.monotonic())
+tk = ui.App.ticker(shown, "↑ x", 4096)
 tk("a", 1024, resumed=True)
 tk("a", 2048)
 tk.finished.add("a")
 tk("b", 1024)
-assert said[-1].startswith("↑ x  3.0K of 4.0K 75%") and "1 files" in said[-1] and "Esc stops" in said[-1], said
+assert said[-1][:2] == ("↑ x", 0.75) and said[-1][2].startswith("3.0K of 4.0K") and said[-1][2].endswith("   1 file"), said
 assert [screen.dur(x) for x in (0, 42, 185, 4213)] == ["0s", "42s", "3m05s", "1h10m"]
 
 now = [0.0]  # the time left follows the link's speed (a moving average over time), not the average since the start
 ui.time = types.SimpleNamespace(monotonic=lambda: now[0], strftime=time.strftime, localtime=time.localtime)
 said.clear()
-tk = ui.App.ticker(types.SimpleNamespace(busy=said.append), "→ big", 1_000_000)
-left = lambda: int(re.search(r"(\d+)s left", said[-1])[1]) + 60 * int((re.search(r"(\d+)m\d+s left", said[-1]) or [0, 0])[1])
+tk = ui.App.ticker(shown, "→ big", 1_000_000)
+left = lambda: int(re.search(r"(\d+)s left", said[-1][2])[1]) + 60 * int((re.search(r"(\d+)m\d+s left", said[-1][2]) or [0, 0])[1])
 for k in range(1, 41):  # 1 KB/s for 40 s
     now[0] = k
     tk("f", 1000 * k)
 slow = left()
-assert "96%" not in said[-1] and abs(slow - 960) < 5 and "1000B/s" in said[-1], said[-1]  # 960 KB to go at 1 KB/s
+assert said[-1][1] == 0.04 and abs(slow - 960) < 5 and "1000B/s" in said[-1][2], said[-1]  # 960 KB to go at 1 KB/s
 for k in range(41, 61):  # then 10 KB/s: within 20 s the estimate has caught up (an all-time average would say ~3 min)
     now[0] = k
     tk("f", 40_000 + 10_000 * (k - 40))
-assert left() < 100 and re.search(r"  (8|9|10)\.\dK/s", said[-1]), said[-1]
+assert left() < 100 and re.search(r"  (8|9|10)\.\dK/s", said[-1][2]), said[-1]
 said.clear()
-tk = ui.App.ticker(types.SimpleNamespace(busy=said.append), "→ x", 100)
+tk = ui.App.ticker(shown, "→ x", 100)
 now[0] += 1
 tk("f", 50, resumed=True)  # nothing moved yet, only found there: no guess at the time left
-assert "50%" in said[-1] and "left" not in said[-1], said[-1]
+assert said[-1][1] == 0.5 and "left" not in said[-1][2], said[-1]
+now[0] = 0  # paused 100 s at 10 B/s: back from it, still 10 B/s (the pause isn't a slow link)
+tk = ui.App.ticker(shown, "→ y", 1000)
+now[0] = 1
+tk("f", 10)
+shown.clock, now[0] = lambda: now[0] - 100, 102  # what App.clock gives: paused time left out
+tk("f", 20)
+assert said[-1][2].startswith("20B of 1000B   10B/s"), said[-1]
+shown.clock = lambda: ui.time.monotonic()
 
-app = types.SimpleNamespace(busy=lambda w: None, msg="")  # the end: what, how much, how long, how fast
+app = types.SimpleNamespace(busy=lambda *a: None, msg="", clock=lambda: ui.time.monotonic())  # the end: what, how much, how long, how fast
 app.ticker = lambda label, total: ui.App.ticker(app, label, total)
 now[0] = 0
 
@@ -752,16 +802,16 @@ def slow_copy(tick):
         tick("f", 8000 * k)
 
 
-ui.App.xfer(app, slow_copy, "→ tree", 8000 * 185, [])
+said = ui.App.xfer(app, slow_copy, "copying tree", 8000 * 185, [])
 ui.time = time
-assert app.msg == "✓ → tree  1.4M in 3m05s, 7.8K/s", app.msg
+assert said == "  1.4M in 3m05s, 7.8K/s", said
 
 (d / "m" / "in").mkdir(parents=True)  # what a copy moves: the files' bytes; not links, pipes, folders
 (d / "m" / "in" / "a").write_bytes(b"x" * 1000)
 (d / "m" / "b").write_bytes(b"y" * 24)
 (d / "m" / "ln").symlink_to("b")
 os.mkfifo(d / "m" / "p")
-counter = types.SimpleNamespace(busy=lambda w: None)
+counter = types.SimpleNamespace(busy=lambda *a: None, doing=None)
 assert ui.App.measure(counter, fs.Local(), str(d), [("m", fs.Local().stat(str(d / "m")))]) == (1024, 2)
 assert ui.App.measure(counter, fs.Local(), str(d / "m"), [("b", fs.Local().stat(str(d / "m" / "b"))), ("ln", fs.Local().stat(str(d / "m" / "ln"), False))]) == (24, 1)
 

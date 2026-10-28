@@ -135,15 +135,15 @@ try:
     rows = lambda s: s.split("\n")
     left = lambda s: "\n".join(r.split("│")[0] for r in rows(s)[2:])  # pane 1's rows, side by side
     if not config.tomllib:  # Python 3.9, 3.10: the config is left unread, said once; this machine works as ever
-        t.until(lambda s: "rshm.toml is read from Python 3.11 on" in s and "note.txt" in s, "config unread, said")
+        t.until(lambda s: "rshm.toml: ignored, needs Python 3.11" in s and "note.txt" in s, "config unread, said")
         t.keys("Tab", "Enter", "g", "^U", str(D), "Enter", "Tab", "/note", "Enter", "c", "Enter")
-        t.until(lambda s: "✓ → note.txt" in s, "a copy")
+        t.until(lambda s: re.search(r"✓ copied note\.txt to local:\S+  \S+ in \d", s), "a copy")
         t.keys("F3")  # (the filter still holds the cursor on note.txt)
         t.until(lambda s: "hello" in s and "/ ? find" in s, "the viewer")
         t.keys("q")
         assert t.quit() == 0 and (D / "note.txt").read_text() == "hello\nworld\n"
     else:  # the config's own: [open], [commands], the host group, themes
-        t.until(lambda s: " 1  local:" in s and "note.txt" in s and "2  hosts" in s and "9bar" in s, "menus, pane 1 here, pane 2  hosts")
+        t.until(lambda s: " 1  local:" in s and "note.txt" in s and "2  hosts" in s and "9pulldown" in s, "menus, pane 1 here, pane 2  hosts")
         t.keys("Tab", "Enter", "g", "^U", str(D), "Enter", "Tab")  # pane 2: this machine too, in dst
         t.until(lambda s: f"2  local:{D}" in s, "pane 2 in dst")
 
@@ -161,16 +161,16 @@ try:
         t.keys("q", "A", "^U", "600", "Enter")  # attributes: only what's typed changes (here the mode)
         t.until(lambda s: "-rw------- " in rows(s)[-5] or "-rw------- " in s.split("└─")[-1], "the ls -l line")
         assert (B / "note.txt").stat().st_mode & 0o777 == 0o600
-        t.keys("c", "Enter")  # F5 copy to the other pane: mode and time travel
-        t.until(lambda s: "✓ → note.txt" in s, "copied")
+        t.keys("c", "Enter")  # F5 copy to other pane: mode and time travel
+        t.until(lambda s: "✓ copied note.txt to " in s, "copied")
         assert (D / "note.txt").read_text() == "hello\nXworld\n" and (D / "note.txt").stat().st_mode & 0o777 == 0o600 and (D / "note.txt").stat().st_mtime == int((B / "note.txt").stat().st_mtime)
         t.keys("Esc", "/mv", "Enter", "F6", "Enter")  # move
-        t.until(lambda s: "✓ moved mv.txt" in s, "moved")
+        t.until(lambda s: "✓ moved mv.txt to " in s, "moved")
         assert (D / "mv.txt").read_text() == "move me" and not (B / "mv.txt").exists()
         t.keys("Esc", "F7", "newdir", "Enter", "R", "^U", "renamed", "Enter")  # new folder, rename, delete
         assert (B / "renamed").is_dir() and not (B / "newdir").exists()
         t.keys("F8", "y")
-        t.until(lambda s: "✓ deleted renamed/" in s and not (B / "renamed").exists(), "deleted")
+        t.until(lambda s: "✓ deleted renamed/ in local:" in s and not (B / "renamed").exists(), "deleted")
 
         t.keys("/note", "Enter", "L", "^U", str(B / "ln.txt"), "Enter")  # a symlink: one question, where; then retarget it
         t.until(lambda s: (B / "ln.txt").is_symlink(), "symlink")
@@ -199,20 +199,20 @@ try:
         (D / "fd").mkdir()  # there already: the move merges, so it copies, and a pipe can't be copied
         os.mkfifo(B / "pipe")
         t.keys("r", "/sub", "Enter", "c", "^U", str(B / "sub"), "Enter")  # r: what was just made shows
-        t.until(lambda s: "a folder can't go inside itself" in s, "copy into itself refused")
+        t.until(lambda s: "cannot copy a directory into itself" in s, "copy into itself refused")
         t.keys("Esc", "/mv", "Enter", "F6", "Enter", "y")
         t.until(lambda s: "✓" in s.split("└─")[-1] and not (B / "mv").exists(), "a folder merged on move")
         assert sorted(x.name for x in (D / "mv").iterdir()) == ["a.txt", "b.txt"]
         t.keys("Esc", "/fd", "Enter", "F6", "Enter", "y")
-        t.until(lambda s: "kept fd here" in s, "a merged tree with a pipe stays")
+        t.until(lambda s: "fd kept" in s, "a merged tree with a pipe stays")
         assert (D / "fd" / "f.txt").read_text() == "f" and (B / "fd" / "p").exists()
         t.keys("Esc", "/pipe", "Enter", "Enter")
-        t.until(lambda s: "pipe: a pipe, socket or device" in s, "a pipe isn't opened")
+        t.until(lambda s: "pipe: not a regular file" in s, "a pipe isn't opened")
         t.keys("Esc", "g", "^U", "sub", "Enter")  # a relative path: from the pane's folder
         t.until(lambda s: f"1  local:{B}/sub" in s, "go to sub")
         (B / "sub" / "note.txt").write_text("dup")
         t.keys("~", "g", "^U", str(B), "Enter", "^F", "^U", "note.txt", "Enter", "*", "c", "Enter")
-        t.until(lambda s: "two of these have the same name" in s, "two of one name refused")
+        t.until(lambda s: "duplicate names in selection" in s, "two of one name refused")
         (B / "sub" / "note.txt").unlink()
         t.keys("h", "Esc", "/note", "Enter", "F4", "\x1c", "hello", "Enter", "Esc", "^X")  # replace, then Esc: nothing
         t.until(lambda s: "10quit" in s, "back from the editor")
@@ -226,7 +226,7 @@ try:
         t.keys("*", "-", "^U", "*.zip", "Enter")
         t.until(lambda s: "*note.txt" in s and "*data.zip" not in s, "unmarked by pattern")
         t.keys("Esc", "D")
-        t.until(lambda s: "differ: F5 copies them over" in s and "*data.zip" in s and "*note.txt" not in s, "compare")
+        t.until(lambda s: "differ, marked" in s and "*data.zip" in s and "*note.txt" not in s, "compare")
         t.keys("Esc", ".")  # dotfiles, sort menu
         t.until(lambda s: ".dot" not in left(s) and "dotfiles hidden" in s, "dotfiles hidden")
         t.keys(".", "S", "Down", "Down", "Enter")
@@ -236,7 +236,7 @@ try:
         t.keys("S", "Down", "Down", "Down", "Down", "Enter", "S", "Enter")
         t.until(lambda s: s.count("sorted by name") and "sorted by name, reversed" not in s.split("\n")[-2], "back to by name")
         t.keys("/sub", "Enter", "z")  # size of a folder
-        t.until(lambda s: "sub: 4B in 1 files" in s, "size")
+        t.until(lambda s: "sub: 4B in 1 file" in s, "size")
 
         (B / "sub" / "gone.txt").write_text("x")  # find: results as the listing; links in them, a delete, a link made
         (B / "sub" / "deep.lnk").symlink_to("deep.txt")
@@ -258,7 +258,7 @@ try:
         t.keys("b", "o")  # the other pane here; swap; swap back
         t.until(lambda s: f"2  local:{B} " in s, "other pane here")
         t.keys("^U")
-        t.until(lambda s: rows(s)[1].startswith("┌─ 1  local") and t.text().count(f"local:{B}") == 2, "swapped")
+        t.until(lambda s: rows(s)[1].startswith("┌─ 1  local") and rows(s)[1].count(f"local:{B} ") == 2, "swapped")
         t.keys("^U", "Tab", "b", "Tab")
         t.until(lambda s: f"2  local:{D}" in s, "pane 2 back in dst")
 
@@ -296,27 +296,27 @@ try:
             t.keys("Enter")
             t.until(lambda s: "theme: default" in s, "theme")
         else:
-            t.until(lambda s: "no theme to pick: this terminal shows no colours" in s, "no colours, no themes")
+            t.until(lambda s: "no themes: terminal has no colours" in s, "no colours, no themes")
         t.keys("F1")
-        t.until(lambda s: "copy to the other pane" in s and "F5 c" in s, "help: every key")
+        t.until(lambda s: "copy to other pane" in s and "F5 c" in s, "help: every key")
         t.keys("Esc", "F9")  # the menu bar: F9, ← → between menus (one open, lit in the bar), Esc; taps on menus and items
         t.until(lambda s: "host list" in s and "swap panes" in s, "menu: Pane 1")
         t.keys("Right", "Right")
         cell = lambda word: t.screen.buffer[0][rows(t.text())[0].index(word)]
         lit = lambda word: (cell(word).bg, cell(word).reverse) != (cell("Pane 2").bg, cell("Pane 2").reverse)
-        t.until(lambda s: "mark by pattern" in s and "info: everything" not in s and "swap panes" not in s and lit("Mark")
+        t.until(lambda s: "mark by pattern" in s and "information" not in s and "swap panes" not in s and lit("Mark")
                 and not lit("File"), "menu: Mark, and only Mark")
         t.keys("Esc")
         t.until(lambda s: "mark by pattern" not in s and not lit("Mark"), "menus closed")
         if MOUSE:  # taps: bar, menu item, F-key bar, titles, rows, right-click (no mouse in this terminal: keys only)
             t.click(0, rows(t.text())[0].index("Options") + 1)
             t.until(lambda s: "edit config" in s and "theme" in s, "Options by a tap")
-            y = next(i for i, r in enumerate(rows(t.text())) if re.search(r"theme: pick one +t ", r))
+            y = next(i for i, r in enumerate(rows(t.text())) if re.search(r"theme +t ", r))
             t.click(y, rows(t.text())[y].index("theme") + 1)
             t.until(lambda s: "─ theme " in s, "an item by a tap: the theme picker")
             t.keys("Esc")
             t.click(len(rows(t.text())) - 1, rows(t.text())[-1].index("7mkdir") + 1)  # the F-key bar answers taps
-            t.until(lambda s: "new folder:" in s, "F7 by a tap")
+            t.until(lambda s: "mkdir:" in s, "F7 by a tap")
             t.keys("Esc")
             t.click(1, 5)  # a tap on a title: the host list; again: back
             t.until(lambda s: "1  hosts" in s, "title tap: host list")
@@ -327,7 +327,7 @@ try:
             t.click(2, 5)
             t.until(lambda s: f"1  local:{T} " in s, "mouse: up a folder")
             t.click(4, 5, 2)
-            t.until(lambda s: "info: everything about it" in s and "symlink" in s, "right-click menu")
+            t.until(lambda s: "information" in s and "symbolic link" in s, "right-click menu")
             t.keys("Esc")
         for k in ("[", "[", "]"):  # the log: older, newer
             t.keys(k)
@@ -357,7 +357,7 @@ try:
         t.keys("Esc", "g")
         t.sweep(lambda s: "go to:" in s, "a prompt")
         t.keys("Esc", "F1")
-        t.sweep(lambda s: "copy to the other pane" in s, "help")
+        t.sweep(lambda s: "copy to other pane" in s, "help")
         t.keys("Esc")
         assert t.quit() == 0
 
@@ -379,13 +379,13 @@ try:
     assert 'theme = "matrix"' in (T / "rshm.toml").read_text() and t.quit() == 0
     if config.tomllib:  # read back: the config, Python 3.11 on
         t = Term([], B, env={"TERM": "xterm"})  # back on 8 colours: the default theme shown, said once, the choice kept
-        t.until(lambda s: "theme matrix: this terminal shows 8 colours; default instead" in s, "a theme this terminal can't show")
+        t.until(lambda s: "theme matrix: terminal has 8 colours, using default" in s, "a theme this terminal can't show")
         assert 'theme = "matrix"' in (T / "rshm.toml").read_text() and t.quit() == 0
     t = Term([], B, env={"TERM": "xterm-kitty"})  # no terminfo for it here: drawn as xterm-256color, said in the log
-    t.until(lambda s: "TERM=xterm-kitty is unknown here: drawn as xterm-256color" in s and "10quit" in s, "TERM unknown")
+    t.until(lambda s: "TERM=xterm-kitty unknown, using xterm-256color" in s and "10quit" in s, "TERM unknown")
     assert t.quit() == 0
     t = Term([], B, env={"TERM": "xterm-256color", "NO_COLOR": "1"})  # no colours, bold and reverse kept
-    t.until(lambda s: "NO_COLOR is set" in s and "10quit" in s, "NO_COLOR")
+    t.until(lambda s: "NO_COLOR set" in s and "10quit" in s, "NO_COLOR")
     assert not any(colour(a) for a in sgr(b"".join(t.raw))) and any(sgr(b"".join(t.raw)))
     assert t.quit() == 0
     t = Term([], B, env={"TERM": "dumb"})  # can't place its cursor: refused, plainly, nothing drawn
@@ -393,11 +393,11 @@ try:
     with contextlib.suppress(OSError):  # (read to its end: the terminal closes when rshm leaves)
         while b := os.read(t.fd, 65536):
             out += b
-    assert out.strip() == b"rshm needs a terminal that can move its cursor; TERM=dumb can't", out
+    assert out.strip() == b"rshm: TERM=dumb cannot address the cursor", out
     assert os.waitpid(t.pid, 0)[1] != 0
     r = subprocess.run([*os.environ.get("RSHM_RUN", sys.executable).split(), T / "rshm.pyz"], stdin=subprocess.DEVNULL,
                        capture_output=True, text=True)
-    assert r.returncode == 1 and r.stderr == "rshm needs a terminal\n", r  # not a terminal at all
+    assert r.returncode == 1 and r.stderr == "rshm: not a terminal\n", r  # not a terminal at all
 
     if config.tomllib:  # the hosts here are the config's group (Python 3.11 on); stress covers SFTP on any
         # --- 2. hosts, through a throwaway sshd ---
@@ -445,7 +445,7 @@ try:
             assert b"PINENTRY-WAS-HERE" in b"".join(t.raw)  # it was written, and drawn over
             assert len(sockets()) == 1, sockets()
             t.keys("Tab", "/big", "Enter", "c", "^U", str(T / "remote"), "Enter")  # copy with the keys
-            t.until(lambda s: "✓ → big.bin" in s, "copied")
+            t.until(lambda s: "✓ copied big.bin to jumped:" in s, "copied")
             assert (T / "remote" / "big.bin").read_bytes() == data
             t.keys("Tab", "s")  # a shell on the host, on the same login; exit brings the screen back
             time.sleep(1)
@@ -453,7 +453,7 @@ try:
             t.until(lambda s: b"RSHM_2" in b"".join(t.raw) and "10quit" in s and "RSHM_2" not in s, "shell, then the screen")
             assert len(sockets()) == 1, sockets()
             t.keys("p")  # the live check
-            t.until(lambda s: "✓ jumped answers" in s, "live check")
+            t.until(lambda s: "✓ jumped: up" in s, "live check")
             t.keys("r", "@")  # a reload keeps the pane's host and its folder
             t.until(lambda s: "● jumped" in s, "reload: the host is still this pane's")
             t.keys("@")

@@ -98,8 +98,14 @@ class VT:  # a terminal (or a window on one) of H×W cells, its keys from a scri
 
     def getch(t):
         r = t.root
-        if r.nd:
-            return r.keys.popleft()[1] if r.keys and isinstance(r.keys[0], tuple) and r.keys[0][0] == "poll" else -1
+        if r.nd:  # ("poll", key), or ("poll", (y, x, buttons)) for a tap
+            if not (r.keys and isinstance(r.keys[0], tuple) and r.keys[0][0] == "poll"):
+                return -1
+            k = r.keys.popleft()[1]
+            if isinstance(k, tuple):
+                r.mouse = (0, k[1], k[0], 0, k[2])
+                return real.KEY_MOUSE
+            return k
         k = t.get_wch()
         return ord(k) if isinstance(k, str) else k
 
@@ -163,6 +169,8 @@ ui.tempfile = types.SimpleNamespace(mkdtemp=lambda: MADE.append(tempfile.mkdtemp
 left = lambda: [m for m in MADE if os.path.exists(m)]
 CFG = BOX / "rshm.toml"
 SCR = VT(30, 120)
+SAID, note = [], ui.App.note  # every log line of the run, whatever app or clear
+ui.App.note = lambda s, t: (SAID.append(t), note(s, t))[1]
 
 
 def start(*keys, H=30, W=120):  # a fresh rshm on a fresh screen, run until its keys run out -> the app
@@ -281,25 +289,25 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     more(app, "/", *"zz", "\x1b")  # Esc in the filter: no filter
     assert app.P.files.flt == "" and len(app.P.files.rows) > 1
     more(app, "@", K.F5)  # on the host list, a file action asks for a host
-    assert "pick a host first" in log(app)
+    assert "no host selected" in log(app)
     more(app, "\x1b", "f")  # history: nothing further
-    assert "no further" in log(app)
+    assert "end of history" in log(app)
     more(app, "@", "/", *"zzzz", "\n", "\n", "\x1b", "\x1b")  # ⏎ on an empty filtered list: nothing
     more(app, "/", *"a.t", K.DOWN, K.UP, K.BACKSPACE, "\x00", "\n")  # the filter: arrows move, ⌫ edits
     assert app.P.files.flt == "a." and app.P.cur()[0] == "a.txt"
     more(app, "\x1b", "\x06", "\x15", "\n")  # ^F with no pattern: nothing
     more(app, "\x06", "\n")  # ^F *: everything below, found
     assert app.P.found == "*" and any(n == "sub" for n, _ in app.P.items)
-    assert "Esc goes back" in log(app)
+    assert "found" in log(app)
     more(app, "\x1b", "D")  # Esc: out of find results, back in the folder  # the other pane shows hosts: nothing to compare with
-    assert "the other pane shows no folder" in log(app)
+    assert "other pane: no directory" in log(app)
     more(app, K.DOWN, "c")
-    assert "the other pane shows no folder: pick one" in log(app)
+    assert "other pane: no directory" in log(app)
     assert not app.P.found
     more(app, "/z.zip", "\n", "\n", "o")  # inside an archive: no mirror; F6 refused; @ and a host leaves it
-    assert "not from inside an archive" in log(app)
+    assert "not supported in an archive" in log(app)
     more(app, "\t", "\n", "\t", K.DOWN, K.F6)
-    assert "an archive is read-only" in log(app)
+    assert "read-only archive" in log(app)
     more(app, "@", K.HOME, "\n")
     assert not app.P.up and "local:" in SCR.text()
     more(app, "@", K.DOWN, "\n", K.DOWN, "h", "h", "\n", "s", "p", K.DOWN, "s", "p")  # ← in a group: to it; ^O, p
@@ -311,9 +319,9 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     more(app, "\x1b", "/a.txt", "\n", "c", "\x15", "/", "\n")  # copy onto a folder you can't write: the jail says no
     assert "jail" in log(app) or "Permission" in log(app)
     more(app, "c", "\x15", str(W), "\n")  # onto itself
-    assert "already is" in log(app)
+    assert "are the same" in log(app)
     more(app, "c", "\x15", str(W / "bin.dat"), "\n")
-    assert "bin.dat: not a folder" in log(app)
+    assert "bin.dat: not a directory" in log(app)
     more(app, "c", "\x15", str(W / "nope" / "x"), "\n")
     assert "No such file" in log(app)
     (W / "sub" / "a.txt").write_text("other")
@@ -321,12 +329,12 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     assert (W / "sub" / "a.txt").read_text() == "other"
     more(app, "c", "\x15", "\n")  # an empty answer: nothing
     more(app, "A", "\x15", *"zz", "\n")  # A: a form, one row per attribute; only the rows you change are applied
-    assert "mode zz: not like 6" in log(app)
+    assert "invalid mode: zz (as in 6" in log(app)
     more(app, "A", K.DOWN, "\x15", *"nobody:nogroup", "\n")
-    assert "✓ owner nobody:nogroup" in log(app) and (W / "a.txt").stat().st_uid != 0
+    assert re.search(r"✓ changed a\.txt in local:\S+: owner nobody:nogroup", log(app)) and (W / "a.txt").stat().st_uid != 0
     mode = (W / "a.txt").stat().st_mode
     more(app, "A", K.DOWN, "\x15", *"99999999:0", "\n", "A", K.DOWN, "\x15", *":root", "\n", "A", "\t", "\x15", *"nouser_x:", "\n")
-    assert "nouser_x: no user by that name here" in log(app) and (W / "a.txt").stat().st_mode == mode
+    assert "nouser_x: no such user" in log(app) and (W / "a.txt").stat().st_mode == mode
     more(app, "A", K.UP, "\x15", *"2001-09-09 01:46", K.UP, K.UP, "\x15", *"600", K.DOWN, K.DOWN, "\n")  # ↑ wraps round
     assert (W / "a.txt").stat().st_mode & 0o777 == 0o600 and time.localtime((W / "a.txt").stat().st_mtime)[:5] == (2001, 9, 9, 1, 46)
     more(app, "A", K.LEFT, K.LEFT, "\x7f", "0", K.HOME, "\x05", K.RIGHT, K.DC, "\x1b")  # the line edits in place; Esc: nothing
@@ -343,6 +351,9 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     more(app, "r", "@", K.F4, "\x1b", "e")  # your editor for the config; for a file: your tools
     assert any("true" in str(c) for c, _ in RAN)
     more(app, "\x1b", "/a.txt", "\n", "v", "e", "\n")
+    CFG.write_text("")
+    more(app, "r", "@", K.F4, "#", "\x13", "\x18", "@")  # no tool: rshm's editor; a save is logged
+    assert CFG.read_text().startswith("#") and re.search(r"✓ saved rshm\.toml in local:/", log(app)), log(app)
     CFG.write_text("")
     more(app, "r", "[", "]", (29, 5, UP), (29, 5, DOWN), (10, 1, RIGHT), "\x1b", (25, 100, RIGHT), "\x1b", (5, 3, DOWN),
          (5, 70, CLICK), (5, 70, CLICK), "\x1b", (0, 2, CLICK), K.RIGHT, (0, 30, CLICK), (0, 0, CLICK), (14, 60, CLICK),
@@ -361,47 +372,111 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     more(app, "L", "\n")  # the default: the other pane's folder (here the same), the same name: taken
     assert "File exists" in log(app).split("\n")[-1]
     more(app, "H", "\x15", *"sub/hl", "\n")  # H: another name; relative to this folder
-    assert (W / "sub" / "hl").stat().st_ino == (W / "a.txt").stat().st_ino and "another name for a.txt" in log(app)
+    assert (W / "sub" / "hl").stat().st_ino == (W / "a.txt").stat().st_ino and re.search(r"✓ linked hl to \S+/a\.txt in local:", log(app))
     more(app, "\x1b", "/sub", "\n", "\n", "/ln", "\n", "L", "\x15", *"hl", "\n", "h", "\x1b")  # L on a link: retarget
     assert os.readlink(W / "sub" / "ln") == "hl"
     more(app, "\x1b", K.HOME, "L", "H", "A")  # on ..: nothing
     more(app, "/bin.dat", "\n", K.F2, K.END, "\n", "\x1b")  # F2, no [commands]: the file actions only; the last is z
-    assert log(app).split("\n")[-1].endswith("bin.dat: 5.0K in 1 files")
+    assert log(app).split("\n")[-1].endswith("bin.dat: 5.0K in 1 file")
     ui.connect = lambda *a, **k: None  # a host that's logged in but doesn't answer
     CFG.write_text('[hosts]\ng = ["nohost"]\n')
     more(app, "r", "@", "/nohost", "\n", "p", "\x1b", "\x1b", "/", ("err",), "x", "\n", "\x1b")
     assert "nohost: ssh: no network" in log(app)
     ui.connect = lambda *a, **k: (_ for _ in ()).throw(ConnectionError("nohost: Permission denied (publickey)."))
     more(app, "@", "/nohost", "\n", "p", "\x1b", "\x1b")  # p never asks for a login: it says one is wanted
-    assert "nohost answers, but wants a login" in log(app)
+    assert "nohost: up, login required" in log(app)
     ui.connect = offline
     more(app, "@", "/nohost", "\n", "p", "\x1b", "\x1b")
-    assert "nohost unreachable: ssh: no network" in log(app)
+    assert "nohost: unreachable (ssh: no network" in log(app)
     os.chdir(BOX)
     (W / "sub" / "many").mkdir()
     for i in range(120):
         (W / "sub" / "many" / str(i)).touch()
     more(app, "\x1b", "\t", ("kick", 2), "\x06", "\n")  # ^C mid-find: what was found so far
-    assert "find stopped" in log(app)
+    assert re.search(r"✗ find \*: stopped, \d+ found", log(app)), log(app)
     more(app, "\x1b", "/sub", "\n", ("kick", 1), "z")  # ^C mid-action: just that action
-    assert "✗ stopped" in log(app)
+    assert "stopped" in log(app)
     more(app, "\x0c")  # ^L: the whole screen drawn again
     assert "10quit" in SCR.text() and "1  local:" in SCR.text()
-    app.busy("a long one")  # the spinner turns by itself while a call blocks (its timer's tick, run here by hand)
-    spun = app.spun
-    app.spin()
-    assert app.spun == spun + 1 and "a long one" in SCR.text()
+    app.log.append("12:00:00 ✓ done before")
+    app.paint()
+    app.busy("a long one", 0.5, "3 found")  # a short action shows nothing: no box, no log line
+    assert "a long one" not in SCR.text() and "Esc stop" not in SCR.text() and "done before" in SCR.text()
+    app.since -= ui.LONG  # run long: the box, and the action as the log's newest line, the one before still there
+    SCR.cells.clear()
+    app.spin()  # (its timer's tick, run here by hand)
+    rows = SCR.text().splitlines()
+    assert "Esc stop" in SCR.text() and re.search(r"^ \d\d:\d\d:\d\d . a long one  3 found", rows[-2]), rows[-3:]
+    assert re.search(r"█+░+  50%", SCR.text()), SCR.text()  # its size known: a bar
+    assert "done before" in rows[-3], rows[-3:]
     app.drawing = True  # never mid-frame
+    SCR.cells.clear()
     app.spin()
-    assert app.spun == spun + 1
+    assert "a long one" not in SCR.text()
     app.drawing = False
+    SCR.keys.append(("poll", 27))  # Esc while a call blocks: read by the tick, stopped there
+    try:
+        app.spin()
+        raise AssertionError("not stopped")
+    except KeyboardInterrupt:
+        pass
     app.idle()
-    more(app, "r", ("poll", 27))  # Esc while it runs: stopped there
-    assert log(app).endswith("✗ stopped")
-    more(app, K.END, "r", ("poll", ord("k")))  # anything else typed meanwhile: done after
-    assert app.P.files.sel == len(app.P.files.rows) - 2
+    app.busy("blocked")  # the real tick, while a call blocks: Space pauses, Space resumes, and it stays resumed; Esc stops
+    SCR.keys.extend([("poll", 32), " "])
+    time.sleep(0.5)
+    assert not app.paused and app.held > 0 and not SCR.keys
+    time.sleep(0.3)
+    assert not app.paused and "Space pause" in SCR.text()
+    SCR.keys.append(("poll", 27))
+    try:
+        time.sleep(5)
+        raise AssertionError("not stopped")
+    except KeyboardInterrupt:
+        pass
+    app.idle()
+    more(app, "r", ("poll", 27))  # Esc while it runs: stopped there, said what
+    assert log(app).endswith(": stopped") and "✗ listing" in log(app).splitlines()[-1]
+    more(app, "r", ("poll", 32))  # Space: paused, and the box says so (the script ends there, mid-pause)
+    rows = SCR.final.splitlines()  # the box, cut out of the screen
+    i = next(k for k, ln in enumerate(rows) if re.search(r"┌─+ listing ", ln))
+    x0 = rows[i].index("┌", rows[i].index(" listing ") - 40)
+    box = [r[x0:rows[i].index("┐", x0) + 1] for r in rows[i:i + 5]]
+    assert re.fullmatch(r"┌─+ listing \S+ ─+┐", box[0]) and box[1].startswith("│ ‖ ") and box[-3].startswith("├─"), box
+    assert "[ Space resume ]   [ Esc stop ]" in box[-2] and re.search(r"‖ listing ", SCR.final), box  # the log says it too
+    app.busy("listing")  # where the paused box's buttons are, for the taps below
+    app.paused = True
+    app.paint()
+    (y, x0, _, _), (_, x1, x2, _) = app.spans["job"]
+    app.paused = False
+    app.idle()
+    app.log.clear()
+    more(app, "r", ("poll", 32), " ")  # Space again: on it goes, and stays going (the Space that resumed is spent)
+    assert "stopped" not in log(app) and not app.paused and app.held > 0 and "Space" not in SCR.text()
+    more(app, "r", ("poll", 32), "\x1b")  # paused, then Esc: stopped
+    assert log(app).endswith(": stopped")
+    app.log.clear()
+    more(app, "r", ("poll", 32), (y + 9, 0, CLICK), (y, x0, CLICK))  # paused; Space resume, tapped: on it goes
+    assert "stopped" not in log(app) and not app.paused
+    more(app, "r", ("poll", 32), (y, x1 + 1, CLICK))  # paused; Esc stop, tapped: stopped
+    assert log(app).endswith(": stopped") and not app.paused
+    more(app, "r", ("poll", (y, x0, CLICK)), ("poll", 27))  # a tap where the box isn't (a short action): nothing
+    assert log(app).endswith(": stopped") and not app.paused
+    more(app, K.END, "r", ("poll", ord("k")), ("poll", 27))  # anything else typed meanwhile: done after, Esc behind it heard
+    assert log(app).endswith(": stopped") and app.P.files.sel == len(app.P.files.rows) - 2
     more(app, "\x1b", "\x1b", "/sub", "\n", K.F8, "^C", "g", "^C")  # ^C at a question: no
     assert (W / "sub").exists()
+    (W / "gone.txt").write_text("x")
+    more(app, "\x1b", "\x1b", "r", "/gone", "\n", K.F8, "y")  # a delete: its line, where
+    assert not (W / "gone.txt").exists() and re.search(r"✓ deleted gone\.txt in local:/\S+/w$", log(app)), log(app)
+
+    def denied(*_):
+        raise PermissionError(13, "Permission denied", "a.txt" + fs.PART)
+    rm, chattr = ui.rm, fs.Local.chattr
+    ui.rm = fs.Local.chattr = denied  # refused: the line says what, where and why, in words (no errno, no part file)
+    more(app, "\x1b", "\x1b", "/a.txt", "\n", "A", "\x15", *"640", "\n", K.F8, "y")
+    ui.rm, fs.Local.chattr = rm, chattr
+    assert re.search(r"✗ changing a\.txt in local:\S+: mode 640: a\.txt: Permission denied\n"
+                     r".*✗ deleting a\.txt in local:\S+: a\.txt: Permission denied$", log(app)), log(app)
     app.cleanup()
 
     # --- a host (a real sftp-server, no jail: scripted keys only): view, your tools, an edit sent back, archives ---
@@ -422,22 +497,22 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
         CFG.write_text(f'[tools]\nview = "true"\nedit = "printf x >>"\n[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
         REAL.append("printf x >>")
         more(app, "r", "v", "e")  # your viewer gets a private copy; your editor's change goes back
-        assert "✓ saved a.txt" in log(app) and (W / "a.txt").read_text().endswith("x")
+        assert "✓ saved a.txt in " in log(app) and (W / "a.txt").read_text().endswith("x")
         RAN.clear()  # binary, with a viewer set: never to it; rshm's hex view of the first MB; not edited
         more(app, "\x1b", "/huge", "\n", "v")
         assert "00000000  00 00" in SCR.final and "(the first 1.0M of 3.0M)" in SCR.final and not RAN
         more(app, "e")
-        assert "huge is binary: v shows it" in log(app) and not RAN
+        assert "huge: binary file" in log(app) and not RAN
         more(app, "\x1b", "/z.zip", "\n", "\n", "h", "\n")  # an archive there
         assert app.P.up
         app.cleanup()
         assert not app.P.up and not left()
         more(app, "r", "\x1b", "/bad.zip", "\n", "\n", "\x1b", "/a.txt", "\n", ("kick", 2), "v")  # not an archive; ^C fetching
-        assert "not an archive I can read (file could not be opened successfully)" in log(app) and "stopped" in log(app) and not left()
+        assert "unreadable archive (file could not be opened successfully)" in log(app) and "stopped" in log(app) and not left()
         CFG.write_text(f'[tools]\nedit = "printf x >> {{file}}; rm -r {W / "rsub"}"\n[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
         REAL[:] = ["printf x >>"]
         more(app, "r", "\x1b", "/rsub", "\n", "\n", "/f", "\n", "e")  # an edit that can't go back: kept, and said where
-        kept = next(Path(x) for x in re.findall(r"your edit is in (\S+)", log(app)))
+        kept = next(Path(x) for x in re.findall(r"edit kept in (\S+)", log(app)))
         assert kept.read_text() == "fx"
         shutil.rmtree(kept.parent)
         more(app, "\x1b", "@", "\x1b", "/", "\x15", "\n")
@@ -455,7 +530,7 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     app = start("/big", "\n", "v")
     assert "(the first 1.0M of 5.0M)" in SCR.final and "line" in SCR.final
     more(app, K.F4, "\x1b", "\x1b", "g", "\x03")
-    assert "big is 5.0M: more than rshm's editor takes (1.0M)" in log(app)
+    assert "big: too large to edit (5.0M, limit 1.0M" in log(app)
     os.chdir(BOX)
     (W / "big").unlink()
 
@@ -468,19 +543,19 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     FAKE.COLORS = 8
     app = start("t", K.DOWN, "\n")  # only what this terminal shows is offered: here the default theme alone
     assert app.theme_name == "default" and app.C is not ui.MONO and [n for n in ui.THEMES if app.can(n)] == ["default"]
-    assert "theme amber: this terminal shows 8 colours; default instead" in log(app), log(app)
+    assert "theme amber: terminal has 8 colours, using default" in log(app), log(app)
     FAKE.COLORS = 256
     os.environ["NO_COLOR"] = "1"
     CFG.write_text('theme = "amber"\n')
     app = start("t")
-    assert app.C is ui.MONO and "theme amber: NO_COLOR is set; bold and reverse instead" in log(app)
-    assert "no theme to pick: NO_COLOR is set" in log(app) and 'theme = "amber"' in CFG.read_text()  # the choice stays
+    assert app.C is ui.MONO and "theme amber: NO_COLOR set, using no colours" in log(app)
+    assert "no themes: NO_COLOR set" in log(app) and 'theme = "amber"' in CFG.read_text()  # the choice stays
     os.environ["NO_COLOR"] = ""  # set but empty: colours (no-color.org)
     assert start().C is not ui.MONO
     del os.environ["NO_COLOR"]
     FAKE.has_colors = lambda: False
     app = start("t")
-    assert app.C is ui.MONO and "this terminal shows no colours" in log(app)
+    assert app.C is ui.MONO and "terminal has no colours" in log(app)
     FAKE.has_colors = lambda: True
     FAKE.use_default_colors = lambda: (_ for _ in ()).throw(real.error("no default colours"))
     CFG.write_text('theme = "default"\n')  # the default theme uses the terminal's own colours: here, none to use
@@ -488,7 +563,7 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     assert app.C is ui.MONO and not app.can("default") and app.can("matrix")
     FAKE.COLORS = 8  # and 8 colours: no theme at all to pick, and the reason given is the real one
     more(app, "t")
-    assert "no theme to pick: this terminal shows 8 colours" in log(app)
+    assert "no themes: terminal has 8 colours" in log(app)
     FAKE.COLORS = 256
     FAKE.use_default_colors = nop
     CFG.write_text("")
@@ -530,6 +605,10 @@ for run in range(int(os.environ.get("RSHM_MONKEY", 40))):
 screen.ASCII, FAKE.COLORS, FAKE.curs_set = False, 256, nop
 os.environ.pop("NO_COLOR", None)
 assert not left(), f"private copies left behind: {left()}"
+lines = [f"✓ {ed} " for _, ed in ui.VERBS.values()] + [f"✗ {ing} " for ing, _ in ui.VERBS.values()]
+missing = config.tomllib and [w for w in lines if not any(t.startswith(w) for t in SAID)]
+assert not missing, missing  # every operation logged its line, done or not, in the one table's words, never Python's
+assert not [t for t in SAID if "[Errno" in t or ui.PART in t], SAID
 os.chdir("/")
 shutil.rmtree(BOX)
 print("app ok")

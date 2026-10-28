@@ -12,20 +12,20 @@ SSH_CONFIG = Path.home() / ".ssh" / "config"
 SAMPLE = """\
 theme = "default"                         # default matrix amber frutiger teletext avionics
                                           # robot cyberwave steel paper ember
-include = []                              # more files beside this one, whose [hosts] join these
+include = []                              # files beside this one; their [hosts] are added
 
-[tools]                                   # empty: $VISUAL, $EDITOR, $PAGER, else rshm's own
+[tools]                                   # unset: $VISUAL, $EDITOR, $PAGER, else built-in
 edit = ""                                 # "nvim", "code -w {file}"
 view = ""                                 # "less -R", "bat --paging=always"
 
-[open]                                    # Enter on a file: the first matching pattern runs its command
+[open]                                    # Enter on a file: first matching pattern's command
 # "*.pdf *.djvu" = "zathura {file}"
 
-[commands]                                # F2, in the pane's folder: {name} {names} {dir} {other}
+[commands]                                # F2 menu, run in the pane's directory: {name} {names} {dir} {other}
 # "disk usage" = "du -sh {names}"
 # "ACLs" = "getfacl {names}"
 
-[hosts]                                   # ssh destinations; reaching them is ~/.ssh/config's business
+[hosts]                                   # ssh destinations, as in ~/.ssh/config
 # work = "work"
 # pi = { host = "me@pi", path = "/srv" }
 # lab = ["box", "nas"]
@@ -43,7 +43,7 @@ def locate():  # rshm.toml next to rshm.pyz (it travels with it), else $XDG_CONF
 
 def unread(cfg):  # why the config isn't read ("" when it is): a Python without TOML
     if cfg.exists() and not tomllib:
-        return f"{cfg.name} is read from Python 3.11 on (this is {sys.version.split()[0]})"
+        return f"{cfg.name}: ignored, needs Python 3.11 (this is {sys.version.split()[0]})"
     return ""
 
 

@@ -17,8 +17,8 @@ def utf8():  # does the terminal take UTF-8? Its locale says, read as tmux reads
 
 
 ASCII = not utf8()  # decided once: a terminal that isn't UTF-8 gets one ASCII character for each one drawn
-GLYPHS = str.maketrans("─│┌┐└┘├┤┬┴" "✓✗…" "→←↑↓" "·×●○▸▾▲▼" "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",  # frames, marks, arrows, signs, spinner
-                       "-|++++++++" "+!~" "><^v" "-x*o>v^v" "|/-\\|/-\\|/")
+GLYPHS = str.maketrans("─│┌┐└┘├┤┬┴" "✓✗…" "→←↑↓" "·×●○▸▾▲▼" "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏‖" "█░",  # frames, marks, arrows,
+                       "-|++++++++" "+!~" "><^v" "-x*o>v^v" "|/-\\|/-\\|/=" "#.")  # signs, spinner and pause, bar
 
 
 def plain(s):  # s as this terminal shows it: as is on UTF-8; else ASCII, one character for each (frames +-|, ✓ +, ✗ !,
@@ -107,6 +107,10 @@ def human(n):  # 1536 -> 1.5K
         if n < 1024 or u == "T":
             return f"{n:.0f}B" if u == "B" else f"{n:.1f}{u}"
         n /= 1024
+
+
+def many(n, word):  # 1 file, 2 files
+    return f"{n} {word}{'s' * (n != 1)}"
 
 
 def dur(s):  # 4213 -> 1h10m, 185 -> 3m05s, 42 -> 42s
