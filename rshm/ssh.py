@@ -1,11 +1,11 @@
 """Logins: one OpenSSH master per destination, reused by everything; stopped when rshm exits.
 Everything about reaching a host (user, key, jump, password) is ~/.ssh/config's business, never rshm's."""
-import hashlib, os, re, subprocess, tempfile
+import hashlib, os, re, signal, subprocess, tempfile
 from pathlib import Path
 
 
 def argv(h, batch=False, timeout=8):  # ssh keeps the FIRST value of an option: these win over ~/.ssh/config
-    o = {"ControlMaster": "auto", "ControlPersist": 300, "ConnectTimeout": timeout,
+    o = {"ControlMaster": "auto", "ControlPersist": 300, **({"ConnectTimeout": timeout} if timeout else {}),
          "ServerAliveInterval": 15,  # a dead link errors out in ~45 s, never hangs
          # a short fixed name, not %C: a unix socket path must fit in ~104 bytes, even under Termux's long $HOME
          "ControlPath": Path.home() / ".ssh" / f"rshm-{hashlib.sha1(h['host'].encode()).hexdigest()[:16]}"}
@@ -40,16 +40,40 @@ def logout():  # -O stop, not exit: a master still carrying a session (another r
         quiet([*argv(h), "-O", "stop", h["host"]])
 
 
-def connect(h, tty, say, timeout=8, ask=True):  # h's master up and logged in; tty(fn, *a) runs fn with the terminal
-    if quiet([*argv(h), "-O", "check", h["host"]])[0] == 0:  # handed over: any login may need it (a gpg passphrase)
+def login(cmd):  # ssh on the terminal, in its own process group put in the foreground -> (exit code, last stderr line)
+    # it, its ProxyCommand (sudo in it) and pinentry can ask and take ^C; once in, the group is in the background again,
+    # so rshm's own ^C (stop a transfer) never reaches the tunnel it leaves behind
+    with tempfile.TemporaryFile() as err:  # not the screen: a jump's ssh -W scribbling on it later
+        try:
+            fd = os.open("/dev/tty", os.O_RDWR)
+        except OSError:  # no terminal: nobody to ask
+            return quiet(cmd)
+        ttou = signal.signal(signal.SIGTTOU, signal.SIG_IGN)  # a background group may take the terminal back
+
+        def front():
+            os.setpgid(0, 0)
+            os.tcsetpgrp(fd, os.getpgrp())
+            signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+
+        try:
+            rc = subprocess.call(cmd, stderr=err, preexec_fn=front)
+        finally:
+            os.tcsetpgrp(fd, os.getpgrp())
+            signal.signal(signal.SIGTTOU, ttou)
+            os.close(fd)
+        return rc, last(err) or f"exit {rc}"
+
+
+def connect(h, tty, say, timeout=None, ask=True):  # h's master up and logged in; tty(fn, *a) runs fn with the terminal
+    if quiet([*argv(h), "-O", "check", h["host"]])[0] == 0:
         return
     say(f"connecting {h['host']}…")
     (Path.home() / ".ssh").mkdir(mode=0o700, exist_ok=True)  # where the login sockets live
-    # quietly first: keys, the agent, or your own SSH_ASKPASS answer without typing (one try at a password)
-    rc, err = tty(quiet, [*argv(h, batch=not os.environ.get("SSH_ASKPASS"), timeout=timeout),
-                          "-o", "NumberOfPasswordPrompts=1", "-N", h["host"]])  # ControlPersist: backgrounds once in
-    if rc and (not ask or unreachable(err) or tty(subprocess.call, [*argv(h, timeout=timeout), "-N", h["host"]]) != 0):
-        # else ssh asks (new host key, 2FA, a password); a dead network won't take a typed one.
-        # ponytail: ^C during a login waits for ssh's timeout (8 s); let ssh take the ^C if that wait bites
+    # one try, terminal handed over (a gpg passphrase asks even in batch mode); ControlPersist: backgrounds once in.
+    # no ConnectTimeout of ours unless asked: a ProxyCommand may take its time (wake a VM), ~/.ssh/config decides;
+    # ponytail: a blackholed route waits for TCP's own timeout (~2 min) or ^C
+    cmd = [*argv(h, batch=not ask, timeout=timeout), "-N", h["host"]]
+    rc, err = tty(login if ask else quiet, cmd)
+    if rc:
         raise ConnectionError(err if err.startswith(h["host"]) else f"{h['host']}: {err}")
     LOGINS.append(h)

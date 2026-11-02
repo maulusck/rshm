@@ -730,24 +730,25 @@ assert config.hosts({"hosts": {"a": "b"}}) == {"a": {"host": "b"}}
 config.SSH_CONFIG = was
 assert fs.names(0, 4_000_000_000)[1] == "4000000000" and fs.names(4_000_000_000, 0)[0] == "4000000000"
 
-# logging in: a dead network is an error at once; a refusal gets the terminal (a password, a host key) once
+# logging in: one try, on the terminal (a gpg or ssh prompt gets it whole, once); no ConnectTimeout of ours
 calls = []
-ssh.quiet = lambda cmd: calls.append(cmd) or (0 if cmd[-2:] == ["check", "up"] else 255,
-                                             "ssh: Could not resolve hostname x" if cmd[-1] == "x" else "denied")
-handed = []  # every login attempt runs with the terminal handed over: a gpg or ssh prompt gets it whole
-tty = lambda fn, *a: handed.append(a[0][-1]) or (term if fn is subprocess.call else fn(*a))
-for host, term, ok in (("up", 1, True), ("x", 0, False), ("y", 1, False), ("z", 0, True)):
+ssh.quiet = lambda cmd: calls.append(cmd) or (0 if cmd[-2:] == ["check", "up"] else 255, "denied")
+ssh.login = lambda cmd: calls.append(cmd) or (0 if cmd[-1] == "z" else 255, "ssh: Could not resolve hostname x")
+handed = []
+tty = lambda fn, *a: handed.append((fn, a[0][-1])) or fn(*a)
+for host, ok in (("up", True), ("x", False), ("z", True)):
     try:
         ssh.connect({"host": host}, tty, lambda m: None)
         assert ok, host
     except OSError as e:
         assert not ok and host in str(e), (host, e)
-assert ssh.LOGINS == [{"host": "z"}] and handed == ["x", "y", "y", "z", "z"]  # "up" was in already
-try:  # asked not to ask (the live check): no terminal login, the refusal is the answer
-    ssh.connect({"host": "w"}, tty, lambda m: None, ask=False)
+assert ssh.LOGINS == [{"host": "z"}] and handed == [(ssh.login, "x"), (ssh.login, "z")]  # "up" was in already
+assert not any("ConnectTimeout" in " ".join(c) for c in calls if c[-2:] == ["-N", "z"])
+try:  # asked not to ask (the live check): batch, detached, its own timeout; the refusal is the answer
+    ssh.connect({"host": "w"}, tty, lambda m: None, timeout=3, ask=False)
     raise AssertionError("asked")
 except ConnectionError as e:
-    assert "denied" in str(e) and handed[-1] == "w" and len(handed) == 6
+    assert "denied" in str(e) and handed[-1] == (ssh.quiet, "w") and "ConnectTimeout=3" in calls[-1]
 ssh.LOGINS.clear()
 
 # progress: how far (0-1, for the bar), how fast, how long still, once a quarter second at most

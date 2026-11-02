@@ -97,7 +97,7 @@ view = ""                                 # "less -R", "bat --paging=always"
 | View, edit | `[open]` match first. Text goes to your tools (`[tools]`, else `$VISUAL` `$EDITOR` `$PAGER`) as a private local copy, written back only if changed. Binary files go to the built-in hex viewer only. Built-in viewer: first MB of any file. Built-in editor: text up to 1 MB |
 | Archives | zip, jar, tar, tar.gz, tar.bz2, tar.xz: browsed as directories, read-only, nested. A remote archive is copied here first and removed on exit. Corruption is reported, never passed on (each format's checksum) |
 | Links | `L` and `H` ask for the new name (other pane's directory offered) for the entry under the cursor. Symbolic links are relative. `i` shows the link count of a file |
-| Logins | one per host, shared by both panes and all transfers. Keys, agent or `SSH_ASKPASS` first, else ssh prompts. The terminal is handed over for any prompt (gpg-agent's pinentry included) and the screen redrawn after |
+| Logins | one per host, shared by both panes and all transfers. One try, with the terminal handed over: keys, agent, gpg-agent's pinentry, ssh's prompts and your `ProxyCommand` (sudo in it) ask there, once; `^C` stops it. No connect timeout of rshm's: `ConnectTimeout` in `~/.ssh/config` decides |
 | Exit | quit, `kill` or a closed terminal: logins closed, temporary copies removed |
 
 ## Terminals
@@ -125,7 +125,6 @@ per file type. Every theme meets WCAG contrast: 4.5:1 for text, 3:1 for faint te
 | plain `.tar` | no checksum: corruption inside is not detected |
 | find | names only; for contents, `grep` through F2 or the shell |
 | `kill -9` | logins remain until 5 minutes idle |
-| `^C` during a login | waits for ssh's timeout (8 s) |
 | root-only files | no sudo; use a host alias that logs in as root |
 | errors on a host | SFTP v3 names only "no such file", "permission denied", "unsupported"; anything else (disk full, quota, read-only) is "failed on the server" |
 | not UTF-8 | non-ASCII names show as `?` |
