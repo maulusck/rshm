@@ -146,15 +146,17 @@ def line(scr, q, text="", attr=0, back=None, ends=(), complete=None):  # the one
             if c in ("\x1b", "\x03"):
                 return text, "\x1b"
             was, fresh = fresh, False
-            if c == "\t" and complete:  # as far as all matches agree; again (or no further): each match in turn
+            if c in ("\t", curses.KEY_BTAB) and complete:  # as far as all matches agree; again (or no further):
+                d = -1 if c == curses.KEY_BTAB else 1          # each match in turn, Shift+Tab back
                 if cyc:
-                    k = (k + 1) % len(cyc)
+                    k = (k + d) % len(cyc)
                     head = cyc[k]
                 else:
                     found = complete(text[:i])
                     head = os.path.commonprefix(found) if found else text[:i]
                     if len(found) > 1 and head == text[:i]:
-                        cyc, k, head = found, 0, found[0]
+                        cyc, k = found, (len(found) - 1) * (d < 0)
+                        head = found[k]
                 text, i = head + text[i:], len(head)
                 continue
             cyc = None

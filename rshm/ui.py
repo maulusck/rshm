@@ -1,12 +1,12 @@
 """The screen, mc's way: a menu bar, two panes (each a folder here or on a host, or the host list), the activity log,
 the F-key bar. Every action is one row of KEYS: keys, menu, F-key bar, F1 and --help all come from there."""
-import atexit, contextlib, curses, fnmatch, grp, math, os, posixpath, pwd, shlex, shutil, signal, socket, stat
+import atexit, contextlib, curses, fnmatch, grp, math, os, posixpath, pwd, random, shlex, shutil, signal, socket, stat
 import subprocess, sys, tempfile, time
 from collections import deque
 
 from . import config, edit as editor, view as viewer
 from .fs import (ARCHIVES, PART, Archive, Local, Remote, complete, copy, folder, isdir, islink, join, kind, look, marker,
-                 names, peek, rm, save, special, walk)
+                 names, pack, peek, rm, save, special, walk)
 from .screen import (CLICK, MOVES, RIGHT, WHEEL_DOWN, WHEEL_UP, bar, cells, cursor, dur, fit, human, line, many, plain,
                      readline, safe, span, window)
 from .ssh import argv, connect, quiet, unreachable
@@ -55,7 +55,8 @@ MONO = dict(zip(ROLES, (0, curses.A_REVERSE, curses.A_BOLD, curses.A_DIM, curses
                         curses.A_DIM, 0, curses.A_BOLD)))
 STYLE = {"b": curses.A_BOLD, "d": curses.A_DIM}
 NAMES = {"Enter": (10, 13, curses.KEY_ENTER), "→": (curses.KEY_RIGHT,), "←": (curses.KEY_LEFT,), "Space": (32,),
-         "Bksp": (curses.KEY_BACKSPACE, 127, 8), "Del": (curses.KEY_DC,), "Ins": (curses.KEY_IC,), "Tab": (9,),
+         "Bksp": (curses.KEY_BACKSPACE, 127, 8), "Del": (curses.KEY_DC,), "Ins": (curses.KEY_IC,),
+         "Tab": (9, curses.KEY_BTAB),
          "Esc": (27,), **{f"^{c}": (ord(c) - 64,) for c in "FLORU"}, **{f"F{i}": (curses.KEY_F0 + i,) for i in range(1, 11)}}
 MENUS = ("Pane 1", "File", "Mark", "Command", "Options", "Pane 2")
 KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under both pane menus; no menu: help only
@@ -64,7 +65,8 @@ KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under bo
     ("File", "F5 c", "copy to other pane", "copy"), ("File", "F6 m", "move to other pane", "move"),
     ("File", "F7 n", "mkdir", "mkdir"), ("File", "F8 x Del", "delete", "delete"), ("File", "R", "rename", "rename"),
     ("File", "A", "mode, owner, time", "chattr"), ("File", "L", "symbolic link (on a link: change target)", "symlink"),
-    ("File", "H", "hard link", "hardlink"), ("File", "z", "disk usage", "size"),
+    ("File", "H", "hard link", "hardlink"), ("File", "P", "pack into an archive", "pack"),
+    ("File", "z", "disk usage", "size"),
     ("Mark", "Space Ins", "mark", "mark"), ("Mark", "*", "mark all / none", "markall"),
     ("Mark", "+", "mark by pattern", "markpat"), ("Mark", "-", "unmark by pattern", "unmarkpat"),
     ("Mark", "D", "mark differences", "compare"),
@@ -84,7 +86,8 @@ KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under bo
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 VERBS = {"copy": ("copying", "copied"), "move": ("moving", "moved"), "delete": ("deleting", "deleted"),  # each operation,
          "mkdir": ("creating", "created"), "rename": ("renaming", "renamed"), "link": ("linking", "linked"),  # as it runs
-         "change": ("changing", "changed"), "save": ("saving", "saved")}  # and as the log keeps it
+         "change": ("changing", "changed"), "save": ("saving", "saved"),  # and as the log
+         "pack": ("packing", "packed")}  # keeps it
 LONG = 0.5  # s: an action running longer shows itself (its log line, the box); keys typed meanwhile are dropped
 HEAD = 1 << 20  # rshm's viewer shows a file's first HEAD bytes; its editor takes files up to HEAD
 ORDER = {"name": lambda x: x[0].casefold(), "extension": lambda x: (posixpath.splitext(x[0])[1].casefold(), x[0]),
@@ -185,8 +188,9 @@ class Pane:  # a folder on some file system, or the host list to pick one
 
 
 class App:
-    def __init__(s, scr, cfg, note=""):  # note: what the start had to say (a TERM drawn as another)
-        s.cfg, s.scr, s.msg, s.typing = cfg, window(scr), "", None
+    def __init__(s, scr, cfg, note="", extra=()):  # note: what the start had to say (a TERM drawn as another);
+        s.cfg, s.scr, s.msg, s.typing = cfg, window(scr), "", None  # extra: destinations named at the start, in no list
+        s.extra = config.tree({n: config.dest(n) for n in extra})
         s.panes, s.focus, s.rects, s.single, s.spans, s.opened = [Pane(), Pane()], 0, [], False, {}, None  # opened: menu
         s.local, s.remotes, s.hosts, s.c, s.cmds, s.theme_name, s.shown = Local(), {}, {}, {}, {}, "default", ""
         s.dots, s.order, s.rev = True, "name", False
@@ -207,6 +211,7 @@ class App:
             with contextlib.suppress(curses.error):
                 curses.use_default_colors()
                 s.defaults = True
+        s.lucky = random.choice([n for n in THEMES if s.can(n)] or ["default"])  # "random": this run's pick
         s.keymap = {c: getattr(s, m) for _, keys, _, m in KEYS if m for c in codes(keys)}
         signal.signal(signal.SIGALRM, s.spin)
         atexit.register(s.cleanup)
@@ -237,7 +242,7 @@ class App:
         except OSError as e:
             c, s.msg = s.c, f"✗ config: {e}"
         old = {h["host"]: h for *_, h, _ in config.flat(s.hosts, set()) if h}
-        s.c, s.hosts, s.cmds = c, config.hosts(c), config.table(c, "commands")
+        s.c, s.hosts, s.cmds = c, {**config.hosts(c), **s.extra}, config.table(c, "commands")
         new = {h["host"]: h for *_, h, _ in config.flat(s.hosts, set()) if h}
         for k, h in new.items():  # a host keeps its last folder, a pane its host, through a reload
             if k in old and "_cwd" in old[k]:
@@ -259,16 +264,17 @@ class App:
             f"terminal has {curses.COLORS if s.colours else 'no'} colours"
 
     def set_theme(s, name):  # the theme as named (and saved); shown if this terminal can, else the default theme, else
-        s.theme_name = name if name in THEMES else "default"  # none: bold, reverse and dim. Never a theme half shown
-        shown = next((n for n in (s.theme_name, "default") if s.can(n)), None)
+        s.theme_name = name if name in THEMES or name == "random" else "default"  # none: bold, reverse and dim. Never
+        want = s.lucky if s.theme_name == "random" else s.theme_name  # a theme half shown
+        shown = next((n for n in (want, "default") if s.can(n)), None)
         s.C = MONO
         if shown:
             t = pairs(THEMES[shown])
             for i, x in enumerate(t, 1):
                 curses.init_pair(i, x[0], x[1])
             s.C = {r: curses.color_pair(i) | STYLE.get(x[2:3] and x[2], 0) for i, (r, x) in enumerate(zip(ROLES, t), 1)}
-        if shown not in (s.theme_name, s.shown):  # a theme not shown as named: said once
-            s.note(f"theme {s.theme_name}: {s.lack()}, using {shown or 'no colours'}")
+        if shown not in (want, s.shown):  # a theme not shown as named: said once
+            s.note(f"theme {want}: {s.lack()}, using {shown or 'no colours'}")
         s.shown = shown
         s.scr.bkgd(" ", s.C["norm"])
 
@@ -429,8 +435,8 @@ class App:
 
     # --- moving around ---
     def ls(s, p, d, keep=None, record=True):  # list folder d in pane p; keep: a name for the cursor; record: history
-        s.busy(f"listing {safe(d) or '~'}")
-        d = p.fs.realpath(d)
+        s.busy(f"listing {safe(d) or '~'}")  # a path from / by name, as cd takes it: .. out of a link is back where
+        d = posixpath.normpath("/" + d.lstrip("/")) if d[:1] == "/" else p.fs.realpath(d)  # it was, not its target
         items = look(p.fs, d)
         if d != p.cwd or p.found:
             if record and p.cwd and not p.up:
@@ -945,7 +951,7 @@ class App:
         c = p.cur()
         if not c or not c[1]:
             return
-        o, name, src = s.O, posixpath.basename(c[0]), join(p.cwd, c[0])
+        o, name, src = s.O, posixpath.basename(c[0]), join(p.fs.realpath(p.cwd), c[0])  # real: what relpath needs
         here = o.cwd if o.mode == "files" and o.fs is p.fs and not o.found else p.cwd  # one file system only
         at = s.ask(f"{kind} {name} as:", join(here, name), p.fs, p.cwd)
         if not at:
@@ -998,6 +1004,57 @@ class App:
                 for n, _ in items:
                     p.fs.chattr(join(p.cwd, n), ch)
             s.op("change", f"{entries(items)} in {s.where(p)}: {', '.join(done)}", apply)
+            s.relist()
+
+    def pack(s):  # P: the marked entries (or the one under the cursor) into a new archive in the other pane's folder,
+        p, o = s.folder(), s.O  # its kind by the name you give it; from anywhere to anywhere, as a copy goes
+        items = p.targets()
+        if not items:
+            return
+        if o.mode != "files" or isinstance(o.fs, Archive):
+            raise OSError("other pane: no directory" if o.mode != "files" else "read-only archive")
+        what = entries(items)
+        base = posixpath.basename(items[0][0] if len(items) == 1 else p.cwd) or "archive"
+        at = s.ask(f"pack {what} as:", join(o.cwd, f"{base}.tar.gz"), o.fs, o.cwd)
+        if not at:
+            return
+        at = s.path(o, at)
+        at = join(o.fs.realpath(posixpath.dirname(at)), posixpath.basename(at))
+        if not at.lower().endswith(ARCHIVES):
+            raise OSError(f"{posixpath.basename(at)}: name it {', '.join(ARCHIVES)}")
+        old = peek(o.fs, at)
+        if old and isdir(old):
+            raise OSError(f"{at}: is a directory")
+        if old and not s.confirm(f"overwrite {posixpath.basename(at)}? (y/N)"):
+            return
+        skipped = []
+
+        def body():  # built here (on this machine, as NAME.rshm-part), then into place; a host's copy goes over after
+            total = s.measure(p.fs, p.cwd, items)[0]
+            d = None if isinstance(o.fs, Local) else tempfile.mkdtemp()
+            out = at + PART if d is None else os.path.join(d, posixpath.basename(at))
+            if d is None:  # made by its file system (what may write where), then filled
+                o.fs.write(out, iter(()), 0, {"perm": 0o644}, None)
+
+            def run(tick):  # ponytail: a dropped link starts the archive over; resume needs an appendable format
+                tick.skipped.clear()
+                pack(p.fs, p.cwd, items, out, tick)
+                skipped[:] = tick.skipped
+            try:
+                more = s.xfer(run, s.doing, total, [p.fs])
+                if d is None:
+                    o.fs.rename(out, at)
+                else:
+                    more = s.xfer(lambda t: copy(s.local, out, o.fs, at, t), s.doing, os.path.getsize(out), [o.fs])
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(out)
+                d and shutil.rmtree(d, ignore_errors=True)
+            return more + (f"; {many(len(skipped), 'pipe, socket or device')} left out" if skipped else "")
+        try:
+            s.op("pack", f"{what} into {o.fs.name}:{at}", body)
+        finally:
+            p.marks -= {n for n, _ in items}
             s.relist()
 
     def size(s):  # z: the size of the marked entries, or of the one under the cursor (a folder: all inside it)
@@ -1072,12 +1129,14 @@ class App:
         names = [n for n in THEMES if s.can(n)]
         if not names:
             raise OSError(f"no themes: {s.lack()}")
-        i = s.choose([(n, "✓" if n == s.shown else "") for n in names], title="theme")
+        names += ["random"] * (len(names) > 1)  # another of them each start
+        i = s.choose([(n, "✓" if n in (s.shown, s.theme_name) else "") for n in names], title="theme")
         if isinstance(i, int):
+            s.lucky = random.choice(names[:-1]) if names[i] == "random" else s.lucky
             s.set_theme(names[i])
             if s.cfg.exists():
                 config.save(s.cfg, config.retheme(s.cfg.read_text(), s.theme_name))
-            s.msg = f"theme: {s.theme_name}"
+            s.msg = f"theme: {s.theme_name}" + f" ({s.shown})" * (s.theme_name == "random")
 
     def editcfg(s):  # the config (from the sample, the first time) in your editor or rshm's own
         config.create(s.cfg)
@@ -1119,8 +1178,9 @@ class App:
                 s.focus = int(MENUS[i][-1]) - 1
             s.act(getattr(s, rows[r][3]))
 
-    def quit(s):
-        sys.exit()
+    def quit(s):  # asked once; the same key again (q q, F10 F10) says yes
+        if s.confirm("quit? (y/N)", (ord("q"), curses.KEY_F10)):
+            sys.exit()
 
     # --- prompts ---
     def ask(s, q, text="", fs=None, base=""):  # the one-line input at the bottom, over the current screen; a path's:
@@ -1128,12 +1188,12 @@ class App:
             return (readline(s.scr, q, text, s.C["acc"] | curses.A_BOLD, s.paint,
                              fs and (lambda t: complete(fs, base, t))) or "").strip()
 
-    def confirm(s, q):  # one key: y says yes, anything else no
+    def confirm(s, q, yes=()):  # one key: y (or one of yes) says yes, anything else no
         s.typing = q
         try:
             with s.still():
                 s.paint()
-                return s.scr.getch() in (ord("y"), ord("Y"))
+                return s.scr.getch() in (ord("y"), ord("Y"), *yes)
         except KeyboardInterrupt:
             return False
         finally:
@@ -1180,10 +1240,10 @@ class App:
             items = [(l, v) for (l, _), v in zip(rows, vals)]
             with s.still():
                 vals[i], k = line(s.scr, f"{title} {rows[i][0]}:", vals[i], s.C["acc"] | curses.A_BOLD,
-                                  lambda: s.popup(items, i, y0, x0, title), (curses.KEY_UP, curses.KEY_DOWN, "\t"))
+                                  lambda: s.popup(items, i, y0, x0, title), (curses.KEY_UP, curses.KEY_DOWN, "\t", curses.KEY_BTAB))
             if k in ("\n", "\x1b"):
                 return vals if k == "\n" else None
-            i = (i + (-1 if k == curses.KEY_UP else 1)) % len(rows)
+            i = (i + (-1 if k in (curses.KEY_UP, curses.KEY_BTAB) else 1)) % len(rows)
 
     def choose(s, items, y=None, x=None, nav=False, title=""):  # a popup of (label, keys) -> index, None, or with
         i, (y0, x0) = 0, (y, x) if y is not None else s.anchor()   # nav: "left"/"right", or (y, x) of a tap outside it
@@ -1474,9 +1534,14 @@ class App:
             s.act(s.key, c)
 
 
-def lcwd():  # the local folder; if someone removed it underneath us, home
+def lcwd():  # the local folder, by the name the shell gave it ($PWD: through links); if someone removed it, home
     try:
-        return os.getcwd()
+        here = os.getcwd()
     except OSError:
         os.chdir(os.path.expanduser("~"))
         return os.getcwd()
+    named = os.environ.get("PWD", "")
+    with contextlib.suppress(OSError):
+        if named[:1] == "/" and os.path.samefile(named, here):
+            return named
+    return here

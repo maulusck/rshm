@@ -2,12 +2,13 @@
 
 Two-pane file manager for this host and every host in `~/.ssh/config`, over sftp. Midnight Commander keys and
 layout. Needs Python 3.9+ and OpenSSH; no other dependencies. Viewer, editor and archive reader are built in.
-Runs as one file, with or without a config.
+Runs as one file, with or without a config or `~/.ssh/config`.
 
 ```sh
 python3 rshm.pyz              # this host, and the host list
 python3 rshm.pyz web          # web in pane 2: name, group/name or unique part
 python3 rshm.pyz web db       # one host per pane
+python3 rshm.pyz me@box:/srv  # any ssh destination, in no list: [user@]host[:path], ssh://user@host:port
 python3 -m rshm --pyz FILE    # write rshm as a single executable file
 ```
 
@@ -42,16 +43,16 @@ as the newest log line and in a box in the middle of the screen; Space pauses, E
 | `F3` `v` · `F4` `e` · `i` | view · edit (on the host list: the config) · information |
 | `F5` `c` · `F6` `m` | copy · move to the other pane (mode and times kept, links kept as links) |
 | `F7` `n` · `F8` `x` `Del` · `R` | mkdir · delete · rename |
-| `A` · `L` · `H` · `z` | mode, owner, time · symbolic link (on a link: change target) · hard link · disk usage |
+| `A` · `L` · `H` · `P` · `z` | mode, owner, time · symbolic link (on a link: change target) · hard link · pack into an archive · disk usage |
 | `Space` `Ins` · `*` · `+` `-` · `D` | mark · mark all / none · mark / unmark by pattern · mark differences |
 | `S` · `.` · `/` · `^F` | sort (name, extension, size, date, reverse) · dotfiles · filter · find by name |
 | `b` `f` · `g` · `~` · `o` · `^U` | history back / forward · go to directory · home · same directory in other pane · swap panes |
 | `F2` · `^O` `s` · `p` | menu (also right-click; your `[commands]` last) · shell · check host |
-| `Tab` · `@` · `Esc` · `r` · `t` · `[` `]` · `^L` · `F10` `q` | other pane · host list · cancel · reread · theme · scroll log · redraw · quit |
+| `Tab` · `@` · `Esc` · `r` · `t` · `[` `]` · `^L` · `F10` `q` | other pane · host list · cancel · reread · theme · scroll log · redraw · quit (asks; the key again: yes) |
 
 Prompts edit like a shell line: `←` `→` `Home` `End` `Del` `^A` `^E` `^K` `^U` `^W`. A suggested value is selected:
-typing replaces it, `Bksp` clears it, `Enter` accepts it. `Tab` completes paths, here or on a host. Forms: `↑` `↓`
-`Tab` between fields. Mouse: click selects, click again opens; right-click opens the menu; the wheel scrolls.
+typing replaces it, `Bksp` clears it, `Enter` accepts it. `Tab` completes paths, here or on a host; again, each match in turn, `Shift+Tab` back. Forms:
+`↑` `↓` `Tab` `Shift+Tab` between fields. Mouse: click selects, click again opens; right-click opens the menu; the wheel scrolls.
 Viewer: less keys (`space` `b` `g` `G` `/` `?` `n` `N`, `N g` line N, `w` wrap, `x` hex). Editor: nano keys (`^S`
 save, `^X` exit, `^W` find, `^\` replace, `^K` `^U` cut, paste, `^_` line, `^Z` undo).
 
@@ -63,7 +64,7 @@ default below. Search order: `-c FILE`, `rshm.toml` beside `rshm.pyz`, `$XDG_CON
 
 ```toml
 theme = "default"                         # default matrix amber frutiger teletext avionics
-                                          # robot cyberwave steel paper ember
+                                          # robot cyberwave steel paper ember random
 include = []                              # files beside this one; their [hosts] are added
 
 [tools]                                   # unset: $VISUAL, $EDITOR, $PAGER, else built-in
@@ -95,8 +96,8 @@ view = ""                                 # "less -R", "bat --paging=always"
 | Progress | none under half a second. Beyond: the operation's log line, live (`copying a.iso to local:/tmp  1.2G of 4.0G  80M/s  36s left`), and a box over the screen: what, bar, numbers, `[ Space pause ]` `[ Esc stop ]`. Space pauses (the box at once), Esc or `^C` stops. Keys typed meanwhile run after a short operation, not after a long one. A stopped copy leaves no part file; files already copied stay |
 | Attributes | `A` on the marked entries or the one under the cursor; only changed fields are applied; names or numbers |
 | View, edit | `[open]` match first. Text goes to your tools (`[tools]`, else `$VISUAL` `$EDITOR` `$PAGER`) as a private local copy, written back only if changed. Binary files go to the built-in hex viewer only. Built-in viewer: first MB of any file. Built-in editor: text up to 1 MB |
-| Archives | zip, jar, tar, tar.gz, tar.bz2, tar.xz: browsed as directories, read-only, nested. A remote archive is copied here first and removed on exit. Corruption is reported, never passed on (each format's checksum) |
-| Links | `L` and `H` ask for the new name (other pane's directory offered) for the entry under the cursor. Symbolic links are relative. `i` shows the link count of a file |
+| Archives | zip, jar, tar, tar.gz, tar.bz2, tar.xz: browsed as directories, read-only, nested. A remote archive is copied here first and removed on exit. Corruption is reported, never passed on (each format's checksum). Extract: copy out (`F5`). Pack: `P`, the marked entries into a new archive in the other pane's folder, its kind by the name you give; mode, times and links kept, pipes and devices left out; built here, then sent where it goes. Changing an archive in place: unpack, change, pack |
+| Links | a link to a directory opens under the link's name: `..` and the title stay on the path you took, as `cd` does (the start too, from `$PWD`). `L` and `H` ask for the new name (other pane's directory offered) for the entry under the cursor. Symbolic links are relative. `i` shows the link count of a file |
 | Logins | one per host, shared by both panes and all transfers. One try, with the terminal handed over: keys, agent, gpg-agent's pinentry, ssh's prompts and your `ProxyCommand` (sudo in it) ask there, once; `^C` stops it. No connect timeout of rshm's: `ConnectTimeout` in `~/.ssh/config` decides |
 | Exit | quit, `kill` or a closed terminal: logins closed, temporary copies removed |
 
@@ -105,7 +106,7 @@ view = ""                                 # "less -R", "bat --paging=always"
 | Terminal | rshm |
 |---|---|
 | UTF-8 (first of `LC_ALL`, `LC_CTYPE`, `LANG` set) | line drawing, ✓ ✗, arrows; otherwise ASCII as mc: `+-\|` frames, `+` `!`, `~` for cut names, `?` |
-| 256 colours | all themes (`t`); the choice is saved |
+| 256 colours | all themes (`t`), or `random`: one of them, another each start; the choice is saved |
 | 8 or 16 colours | default theme in the terminal's colours; the saved choice is kept |
 | no colours, or `NO_COLOR` set | bold, reverse, dim |
 | `TERM` without terminfo here (kitty, ghostty over ssh) | drawn as `xterm-256color`, noted in the log |
@@ -136,7 +137,7 @@ per file type. Every theme meets WCAG contrast: 4.5:1 for text, 3:1 for faint te
 | `config.py` | config and host list (its tree plus `~/.ssh/config`) |
 | `ssh.py` | logins: one OpenSSH master per host |
 | `sftp.py` | SFTP v3 client |
-| `fs.py` | file systems: `Local`, `Remote`, `Archive`; copy, delete, save, walk |
+| `fs.py` | file systems: `Local`, `Remote`, `Archive`; copy, delete, save, walk, pack |
 | `ui.py` | the screen; `KEYS`: keys, menus, F-keys, help; `THEMES`: colours |
 | `view.py` `edit.py` `screen.py` | viewer, editor; text width, fitting, ASCII fallback |
 
@@ -147,7 +148,7 @@ and a row in `KEYS`. To add a file system: a class with `fs.py`'s primitives.
 
 | Run | |
 |---|---|
-| `python3 test_rshm.py` | logic, offline: config, hosts, layout, text width, file types, copies in every direction, links, times, attributes, archives, find, sort, viewer, editor, themes |
+| `python3 test_rshm.py` | logic, offline: config, hosts, layout, text width, file types, copies in every direction, links, times, attributes, archives (read and packed), find, sort, viewer, editor, themes |
 | `python3 test_stress.py` | against a real `sftp-server`, seeded (`RSHM_SEED`, `RSHM_TREES`): random trees copied every way and compared with `cp -a`; connection dropped and `^C` before every reply; full disk; shrinking source; servers that refuse attributes, print banners or read short; fuzzed text, editor, wire format, config |
 | `python3 test_app.py` | the application on a strict virtual terminal (`RSHM_MONKEY`): every branch, then random keys, taps and sizes on every terminal kind; confined to a temporary directory |
 | `python3 test_live.py` | the built `rshm.pyz` on a real terminal: every key, menu and tap, every screen at every size, terminal kinds, then hosts through a throwaway sshd and a jump host (needs `pyte`, `sshd`; `RSHM_TERM` sets the terminal) |

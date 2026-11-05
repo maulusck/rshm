@@ -1,5 +1,6 @@
 """One file system interface, three of them: Local (this machine), Remote (a host, over SFTP) and Archive (a zip or
-tar, read-only). Everything a pane does goes through these primitives, so copy, move and delete work between any two.
+tar, read-only; pack() makes one). Everything a pane does goes through these primitives, so copy, move and delete work
+between any two.
 
     name                                its label
     realpath(p) ("" = home)  stat(p, follow)  listdir(d)  readlink(p)  free(p) -> bytes or None
@@ -19,7 +20,8 @@ from .sftp import CHUNK, SFTP
 from .ssh import argv, connect
 
 PART = ".rshm-part"  # a file in transit: resumed from, renamed into place once complete
-ARCHIVES = (".zip", ".jar", ".tar", ".tgz", ".tar.gz", ".tbz2", ".tar.bz2", ".txz", ".tar.xz")
+TARS = {".tar": "", ".tgz": "gz", ".tar.gz": "gz", ".tbz2": "bz2", ".tar.bz2": "bz2", ".txz": "xz", ".tar.xz": "xz"}
+ARCHIVES = (".zip", ".jar", *TARS)  # what rshm browses and packs, by name
 BROKEN = (tarfile.TarError, zipfile.BadZipFile, EOFError, KeyError, lzma.LZMAError, zlib.error)  # an archive's damage
 MEDIA = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".mp3", ".flac", ".ogg", ".wav", ".mp4", ".mkv", ".webm",
          ".avi", ".mov")
@@ -343,6 +345,59 @@ def walk(fs, d, rel=""):  # every entry under d, as (path relative to d, attrs, 
         yield join(rel, n) if rel else n, a
         if isdir(a):
             yield from walk(fs, d, join(rel, n) if rel else n)
+
+
+class Stream:  # chunks as a file to read from: what tarfile takes a member's content as
+    def __init__(s, chunks):
+        s.it, s.buf = chunks, b""
+
+    def read(s, n=-1):
+        while (n < 0 or len(s.buf) < n) and (b := next(s.it, None)):
+            s.buf += b
+        out, s.buf = (s.buf, b"") if n < 0 else (s.buf[:n], s.buf[n:])
+        return out
+
+
+def pack(src, d, items, out, tick):  # items (names in folder d of src, trees whole) into a new archive at local path
+    """out, its kind by its name (ARCHIVES), paths inside as the names given. Mode, times and links kept, as in a
+    copy; pipes, sockets and devices go to tick.skipped, files in transit stay out. tick(path, at): bytes read."""
+    tar = next((m for e, m in TARS.items() if out.removesuffix(PART).lower().endswith(e)), None)
+    z = zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) if tar is None else tarfile.open(out, f"w:{tar}".rstrip(":"))
+
+    def content(p, size):  # the file's bytes, read with progress
+        at = 0
+        for c in src.read(p, 0, size):
+            at += len(c)
+            tick(p, at)
+            yield c
+    with z:
+        for n, a in items:
+            for rel, b in [(n, a), *((join(n, r), c) for r, c in walk(src, join(d, n)))] if isdir(a) else [(n, a)]:
+                p, perm = join(d, rel), b.get("perm", 0)
+                if p.endswith(PART):  # the archive itself, when it grows inside the tree
+                    continue
+                if special(b):
+                    tick.skipped.append(p)
+                    continue
+                link = (b.get("target") or src.readlink(p)) if islink(b) else None
+                size = b.get("size", 0) if stat.S_ISREG(perm) else 0
+                if tar is None:  # zip: a link's target is its content (zip -y), a folder's name ends in /
+                    when = max(time.localtime(b.get("mtime", 0))[:6], (1980, 1, 1, 0, 0, 0))  # zip starts in 1980
+                    zi = zipfile.ZipInfo(rel + "/" * isdir(b), when)
+                    zi.external_attr, zi.compress_type, zi.file_size = perm << 16, zipfile.ZIP_DEFLATED, size
+                    if not size:
+                        z.writestr(zi, (link or "").encode(errors="surrogateescape"))
+                        continue
+                    with z.open(zi, "w") as f:
+                        for c in content(p, size):
+                            f.write(c)
+                else:
+                    ti = tarfile.TarInfo(rel)
+                    ti.type = tarfile.DIRTYPE if isdir(b) else tarfile.SYMTYPE if link is not None else tarfile.REGTYPE
+                    ti.mode, ti.mtime, ti.size, ti.linkname = perm & 0o7777, b.get("mtime", 0), size, link or ""
+                    ti.uid, ti.gid = b.get("uid", 0), b.get("gid", 0)
+                    ti.uname, ti.gname = b.get("user", ""), b.get("group", "")
+                    z.addfile(ti, Stream(content(p, size)) if size else None)
 
 
 def rm(fs, p, a=None):  # recursive; a link is removed, never followed
