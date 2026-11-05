@@ -53,6 +53,9 @@ assert names(r for r in rows if config.match(r, "deploy@")) == ["web"]
 paths = lambda q: ["/".join(p) for p, _ in config.find(h, q)]
 assert paths("web") == ["prod/web"] and paths("lab/pi") == ["lab/pi"] and paths("DB") == ["prod/db"]
 assert paths("lab") == ["lab/pi", "lab/box"] and paths("nope") == [] and paths("we") == ["prod/web"]
+assert paths("me@we") == paths("web:/x") == []  # a destination: never a part of a name
+assert config.dest("me@box:/srv") == {"host": "me@box", "path": "/srv"} and config.dest("box") == {"host": "box"}
+assert config.dest("ssh://me@box:2222") == {"host": "ssh://me@box:2222"} and config.dest("box:") == {"host": "box"}
 
 # ssh argv: the ssh config does user/key/jump; rshm adds only its master and timeouts, once (ssh keeps the first)
 a = ssh.argv(H["web"], batch=True, timeout=3)
@@ -442,6 +445,11 @@ if srv:
         assert fs.complete(f, "/", str(D / "t") + "/sub/") == [str(D / "t" / "sub" / "x.txt")]
         assert fs.complete(f, str(D), "nope/x") == [] and fs.complete(f, str(D), "t/sub/x.txt/") == []
     assert fs.complete(Lo, "/", "~/") == fs.complete(Lo, "/", str(Path.home()) + "/") and fs.complete(R, "/", "~/x") == []
+    tk = lambda *a: None  # pack from a host: the same archive as from here
+    tk.skipped = []
+    fs.pack(R, str(D), [("t", R.stat(str(D / "t"), False))], str(d / "r.tar.xz"), tk)
+    with tarfile.open(d / "r.tar.xz") as tf:
+        assert tf.extractfile("t/big.bin").read() == big and tf.getmember("t/ln").linkname == "sub/x.txt"
     chunks = s.read(str(D / "t" / "big.bin"), 0, len(big))  # a read stopped early leaves no replies behind
     next(chunks)
     chunks.close()
@@ -498,6 +506,37 @@ ar = fs.Archive(str(d / "ln.zip"), "x")
 assert ar.readlink("/ln") == "t.txt" and ar.stat("/ln")["size"] == 6 and dict(fs.look(ar, "/"))["ln"]["target"] == "t.txt"
 assert fs.peek(ar, "/nope") is None and fs.peek(ar, "/t.txt")["size"] == 6 and ar.alive()
 assert fs.complete(ar, "/", "") == ["ln", "t.txt"] and fs.complete(ar, "/", "/t") == ["/t.txt"]  # inside an archive too
+# pack: a tree into each kind, by name, from any file system; it reads back as it was (links, modes, times), pipes left out
+(src / "ln").symlink_to("sub/a.txt")
+os.mkfifo(src / "fifo")
+os.chmod(src / "sub" / "a.txt", 0o751)
+os.utime(src / "sub" / "a.txt", (1_000_000_000, 1_000_000_000))
+(src / "big.bin").write_bytes(os.urandom(300_000))
+for ext in fs.ARCHIVES:
+    tick = lambda p, at: seen.__setitem__(p, at)
+    seen, tick.skipped = {}, []
+    out = str(d / f"p{ext}")
+    fs.pack(fs.Local(), str(d), [("srcdir", fs.Local().stat(str(src), False))], out, tick)
+    assert tick.skipped == [str(src / "fifo")] and seen[str(src / "big.bin")] == 300_000, (ext, tick.skipped)
+    pa = fs.Archive(out, "p")
+    assert sorted(n for n, _ in pa.listdir("/srcdir")) == ["big.bin", "hard.txt", "ln", "sub"], ext
+    assert pa.readlink("/srcdir/ln") == "sub/a.txt" and b"".join(pa.read("/srcdir/ln", 0, 3)) == b"AAA"
+    a = pa.stat("/srcdir/sub/a.txt")
+    assert a["perm"] & 0o777 == 0o751 and a["mtime"] == 1_000_000_000, (ext, a)
+    assert b"".join(pa.read("/srcdir/big.bin", 0, 300_000)) == (src / "big.bin").read_bytes()
+    tick.skipped = []  # from inside an archive: repacked
+    fs.pack(pa, "/srcdir", [("sub", pa.stat("/srcdir/sub"))], str(d / "re.zip"), tick)
+    pa.close()
+    with zipfile.ZipFile(d / "re.zip") as zf:
+        assert zf.read("sub/a.txt") == b"AAA" and zf.getinfo("sub/").is_dir()
+inner = str(src / "sub" / ("in.tar" + fs.PART))  # packed into the very tree it packs: never itself
+fs.pack(fs.Local(), str(src), [("sub", fs.Local().stat(str(src / "sub")))], inner, tick)
+with tarfile.open(inner) as tf:
+    assert tf.getnames() == ["sub", "sub/a.txt"], tf.getnames()
+os.unlink(inner)
+for x in ("fifo", "ln", "big.bin"):
+    os.unlink(src / x)
+os.chmod(src / "sub" / "a.txt", 0o644)
 for bad in (lambda: ar.stat("/nope"), lambda: ar.readlink("/t.txt")):
     try:
         bad()
@@ -706,7 +745,7 @@ cfg = d / "c.toml"
 cfg.write_text('[hosts]\nweb = "w"\nweb2 = "w2"\n')
 assert "no such file" in run("-c", str(d / "none.toml"))[1] and "at most two hosts" in run("a", "b", "c")[1]
 if tomllib:
-    assert "ambiguous host 'we': web, web2" in run("-c", str(cfg), "we")[1] and "no such host: 'zz'" in run("-c", str(cfg), "zz")[1]
+    assert "ambiguous host 'we': web, web2" in run("-c", str(cfg), "we")[1] and run("-c", str(cfg), "zz")[0] == 0  # in no list: a destination
     assert run("-c", str(cfg), "web")[0] == 0 and run("-c", str(cfg), "web", "web2")[0] == 0
     (d / "bad.toml").write_text("[hosts\n")
     assert "bad.toml" in run("-c", str(d / "bad.toml"), "x")[1]

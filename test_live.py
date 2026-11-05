@@ -103,7 +103,7 @@ class Term:  # one rshm in a pseudo terminal, its screen kept by pyte
         t.until(lambda s: back(s) and "ERR" not in s and "Error" not in s, f"{what}, after every size")
 
     def quit(t):
-        os.write(t.fd, b"q")
+        os.write(t.fd, b"qq")  # q asks, q again says yes
         with contextlib.suppress(OSError):  # read on to the end: a full terminal would hold rshm's exit up
             while os.read(t.fd, 65536):
                 pass

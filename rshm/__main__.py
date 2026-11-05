@@ -1,4 +1,5 @@
-"""rshm [HOST [HOST]]: one host opens in the right pane (this machine on the left), two side by side."""
+"""rshm [HOST [HOST]]: one host opens in the right pane (this machine on the left), two side by side. A HOST in no list
+is taken as an ssh destination: me@box, box:/srv, ssh://me@box:2222."""
 import argparse, atexit, curses, importlib.resources, os, signal, sys, zipfile
 from pathlib import Path
 
@@ -43,7 +44,8 @@ def terminal():  # the terminal ncurses will draw on -> a note for the log. A TE
 def main():
     ap = argparse.ArgumentParser(prog="rshm", description="two-pane file manager for this host and ssh hosts, over sftp",
                                  epilog=keys_help(), formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("host", nargs="*", help="host to open: name, group/name or unique part (at most two)")
+    ap.add_argument("host", nargs="*", help="host to open: name, group/name or unique part, else an ssh destination "
+                                            "([user@]host[:path], ssh://user@host:port); at most two")
     ap.add_argument("-c", "--config", type=Path, help=f"config file (default {config.locate()})")
     ap.add_argument("-V", "--version", action="version", version=f"rshm {__version__}")
     ap.add_argument("--pyz", type=Path, metavar="FILE", help="write rshm as a single executable file and exit")
@@ -57,24 +59,24 @@ def main():
         ap.error(config.unread(cfg))
     if len(a.host) > 2:
         ap.error("at most two hosts")
-    start = []
-    if a.host:  # resolved before the screen opens, so a typo is a plain error
+    start, extra = [], []  # extra: destinations in no list
+    if a.host:  # resolved before the screen opens: an ambiguous name is a plain error
         try:
             hs = config.hosts(config.read(cfg))
         except OSError as e:
             ap.error(f"{cfg}: {e}")
         for name in a.host:
             m = config.find(hs, name)
-            if len(m) != 1:
-                ap.error(f"ambiguous host {name!r}: {', '.join('/'.join(p) for p, _ in m)}" if m
-                         else f"no such host: {name!r}")
-            start.append(m[0][0])
+            if len(m) > 1:
+                ap.error(f"ambiguous host {name!r}: {', '.join('/'.join(p) for p, _ in m)}")
+            start.append(m[0][0] if m else (name,))  # in no list: a destination of its own, ssh finds it
+            extra += [] if m else [name]
     for sig in (signal.SIGTERM, signal.SIGHUP):  # kill or a closed terminal unwind normally: terminal and logins cleaned
         signal.signal(sig, lambda n, _: sys.exit(128 + n))
     note = terminal()
     atexit.register(logout)
     try:
-        curses.wrapper(lambda scr: App(scr, cfg, note).loop(start))
+        curses.wrapper(lambda scr: App(scr, cfg, note, extra).loop(start))
     except KeyboardInterrupt:
         pass
     except curses.error as e:

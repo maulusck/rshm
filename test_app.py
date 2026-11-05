@@ -2,7 +2,7 @@
 """The whole app in this process, on a strict virtual terminal (a write past any edge is an error, also where the
 app would hide one): scripted keys for the paths the pty test doesn't press, then a monkey of random keys, taps and
 sizes (RSHM_SEED, RSHM_MONKEY steps). Jailed: no write lands outside a temp sandbox, nothing reaches the network."""
-import builtins, collections, curses as real, os, random, re, shutil, tempfile, time, types, zipfile
+import builtins, collections, curses as real, os, random, re, shutil, tarfile, tempfile, time, types, zipfile
 from pathlib import Path
 
 BOX = Path(tempfile.mkdtemp(prefix="rshm-app-")).resolve()
@@ -378,6 +378,28 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     more(app, "\x1b", K.HOME, "L", "H", "A")  # on ..: nothing
     more(app, "/bin.dat", "\n", K.F2, K.END, "\n", "\x1b")  # F2, no [commands]: the file actions only; the last is z
     assert log(app).split("\n")[-1].endswith("bin.dat: 5.0K in 1 file")
+    more(app, "\x1b", "/sub", "\n", "P", "\x15", *"s.zip", "\n", "P", "\n")  # P: into an archive, its kind by its name, here
+    with zipfile.ZipFile(W / "s.zip") as zf:
+        assert "sub/bin.dat" in zf.namelist() and re.search(r"✓ packed sub/ into local:\S+/s\.zip  ", log(app))
+    with tarfile.open(W / "sub.tar.gz", "r:gz") as tf:  # the name offered: a tar.gz, as named
+        assert "sub/bin.dat" in tf.getnames()
+    more(app, "P", "\x15", *"s.zip", "\n", "n", "P", "\x15", *"s.rar", "\n")  # there already: asked; no such kind
+    assert "s.rar: name it .zip" in log(app)
+    more(app, "P", "\x15", *"/x.tar", "\n")  # a folder you can't write: nothing made
+    assert re.search(r"✗ packing sub/ into local:/x\.tar: ", log(app)) and not os.path.exists("/x.tar.rshm-part")
+    more(app, "P", "\x15", *"sub", "\n")
+    assert "name it" in log(app).split("\n")[-1]
+    more(app, "P", "\x15", *"s", "\t", "\t", real.KEY_BTAB, real.KEY_BTAB, "\x1b")  # Tab round the matches, Shift+Tab back
+    more(app, "/lnd", "\n", "\n", "h")  # out of a link to a folder: back where it was, not to its target's parent
+    assert app.P.cwd == str(W) and app.P.cur()[0] == "lnd", (app.P.cwd, app.P.cur())
+    more(app, "q", "n")  # q asks; anything but y (or q again) stays
+    assert app.P.cwd == str(W)
+    SCR.keys.append("q")  # q again: yes
+    try:
+        app.quit()
+        raise AssertionError("still running")
+    except SystemExit:
+        pass
     ui.connect = lambda *a, **k: None  # a host that's logged in but doesn't answer
     CFG.write_text('[hosts]\ng = ["nohost"]\n')
     more(app, "r", "@", "/nohost", "\n", "p", "\x1b", "\x1b", "/", ("err",), "x", "\n", "\x1b")
@@ -494,6 +516,11 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
         CFG.write_text(f'[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
         app = start("@", "/srv", "\n", "\n", "/a.txt", "\n", K.F3, "q")
         assert app.P.fs.name == "srv" and app.P.cwd == str(W)
+        was = app.O.host, app.O.cwd
+        more(app, "o", "P", "\n")  # packed into a host: built here, sent over
+        with tarfile.open(W / "a.txt.tar.gz") as tf:
+            assert tf.getnames() == ["a.txt"] and not left()
+        app.act(app.open_host, app.O, *was)
         CFG.write_text(f'[tools]\nview = "true"\nedit = "printf x >>"\n[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
         REAL.append("printf x >>")
         more(app, "r", "v", "e")  # your viewer gets a private copy; your editor's change goes back
@@ -570,7 +597,7 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
 
 # --- the monkey: random keys, taps and sizes; never an error that isn't an OSError, never a write off the screen ---
 TYPES = {n for n, v in vars(builtins).items() if isinstance(v, type) and issubclass(v, BaseException)} | {"error"}
-keys = [*"\n\t \x1b*+-.@[]~/abcdefghijklmnopqrstuvwxyzADHLRSz?\x06\x0f\x12\x15\x03", *(getattr(K, n) for n in vars(K))]
+keys = [*"\n\t \x1b*+-.@[]~/abcdefghijklmnopqrstuvwxyzADHLPRSz?\x06\x0f\x12\x15\x03", *(getattr(K, n) for n in vars(K))]
 MODES = [{}, {"ASCII": True}, {"ASCII": True, "COLORS": 8, "curs_set": True}, {"NO_COLOR": True}]  # every terminal
 for run in range(int(os.environ.get("RSHM_MONKEY", 40))):
     mode = MODES[run % len(MODES)]

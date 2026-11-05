@@ -161,7 +161,12 @@ def match(row, q):  # q already lowercase; "" matches all
     return any(q in x.lower() for x in row[3]) or bool(row[2]) and q in row[2]["host"].lower()
 
 
-def find(hosts, name):  # -> [(path, host)]: exact name or group/name, else substring: `rshm we` -> prod/web
-    hs = [(p, h) for _, _, h, p in flat(hosts, set()) if h]
+def find(hosts, name):  # -> [(path, host)]: exact name or group/name, else substring: `rshm we` -> prod/web;
+    hs = [(p, h) for _, _, h, p in flat(hosts, set()) if h]  # a destination (me@box, box:/srv) only by its name
     exact = [x for x in hs if name in ("/".join(x[0]), x[0][-1])]
-    return exact or [x for x in hs if name.lower() in "/".join(x[0]).lower()]
+    return exact or [x for x in hs if name.lower() in "/".join(x[0]).lower()] * (not re.search("[@:]", name))
+
+
+def dest(name):  # a host in no list, as typed, scp's way: [user@]host[:path], or ssh://[user@]host[:port]; the rest
+    host, _, path = (name, "", "") if name.startswith("ssh://") else name.partition(":")  # is ssh's (keys, jumps)
+    return {"host": host, **({"path": path} if path else {})}  # ponytail: IPv6 as ssh://[::1] only, no [::1]:path
