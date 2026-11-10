@@ -307,7 +307,7 @@ if srv:
     assert seen.done == len(big) + 1 and os.readlink(D / "t" / "loop") == str(L) and os.readlink(D / "t" / "gone") == str(d / "nowhere")
     assert (D / "t" / "big.bin").stat().st_mtime == int((L / "big.bin").stat().st_mtime)  # times travel (cp -p)
     fs.copy(Lo, str(L), R, str(D / "t"), seen)  # a reconnect re-walks the tree: finished files aren't sent again
-    assert seen.done == len(big) + 1 and len(seen.finished) == 2 and not list(D.rglob("*" + fs.PART))
+    assert seen.done == len(big) + 1 and len(seen.finished) == 4 and not list(D.rglob("*" + fs.PART))
     os.chmod(D / "t" / "sub" / "x.txt", 0o600)  # replacing: the source's permissions, not the replaced file's
     (L / "sub" / "x.txt").write_text("new")
     os.chmod(L / "sub" / "x.txt", 0o640)
@@ -419,6 +419,13 @@ if srv:
         assert (D / "b").stat().st_mtime == 1_000_000_000
     assert sorted(r for r, _ in fs.walk(Lo, str(D / "t"))) == sorted(str(x.relative_to(D / "t")) for x in (D / "t").rglob("*"))
     assert dict(fs.walk(R, str(D / "t")))["ln"]["target"] == "sub/x.txt"  # find results know their links' targets too
+    (D / "many").mkdir()  # links asked in windows: more of them than are ever in flight, the dangling ones None
+    for i in range(150):
+        (D / "many" / f"l{i}").symlink_to("../b" if i % 2 else "nowhere")
+    seen_as = lambda f: sorted((n, a["target"], (a["dest"] or {}).get("size")) for n, a in fs.look(f, str(D / "many")))
+    assert seen_as(R) == seen_as(Lo) and not s.early
+    assert sum(a["dest"] is None for _, a in fs.look(R, str(D / "many"))) == 75
+    shutil.rmtree(D / "many")
     for mode in (0o444, 0o775):  # a copy here gets the exact mode, not one bent by the umask
         os.chmod(D / "b", mode)
         fs.copy(R, str(D / "b"), Lo, str(d / "exact"), ticker())

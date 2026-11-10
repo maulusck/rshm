@@ -4,6 +4,7 @@ between any two.
 
     name                                its label
     realpath(p) ("" = home)  stat(p, follow)  listdir(d)  readlink(p)  free(p) -> bytes or None
+    links(ps) -> [(target, attrs of what it points to or None)], one per link
     mkdir(p)  rmdir(p)  unlink(p)  rename(a, b, replace)  symlink(target, p)  hardlink(src, p)
     chattr(p, ch)                       ch: {"perm", "uid", "gid", "mtime"}, the one door for attributes
     read(p, off, size) -> chunks        write(p, chunks, off, ch, done)
@@ -97,6 +98,9 @@ class Local:
     def readlink(s, p):
         return os.readlink(p)
 
+    def links(s, ps):
+        return links(s, ps)
+
     def free(s, p):
         v = os.statvfs(p)
         return v.f_frsize * v.f_bavail
@@ -160,7 +164,7 @@ class Local:
 
 
 class Remote:  # a host; its SFTP session opens on first use and reopens after a drop
-    PRIMS = {"stat", "listdir", "readlink", "free", "mkdir", "rmdir", "unlink", "rename", "symlink", "hardlink", "chattr",
+    PRIMS = {"stat", "listdir", "readlink", "links", "free", "mkdir", "rmdir", "unlink", "rename", "symlink", "hardlink", "chattr",
              "read", "write"}
 
     def __init__(s, h, tty, say):  # tty(fn, *a): fn run with the terminal handed over; say(what): what's going on
@@ -260,6 +264,9 @@ class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a fold
             raise OSError(f"{p}: not a symbolic link")
         return a["link"]
 
+    def links(s, ps):
+        return links(s, ps)
+
     def free(s, p):
         return None
 
@@ -289,6 +296,19 @@ class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a fold
         s.z.close()
 
 
+def links(fs, ps):  # each link's target and what it points to, one by one: where asking costs no round trip
+    out = []
+    for p in ps:
+        try:
+            dest = fs.stat(p)
+        except ConnectionError:
+            raise
+        except OSError:
+            dest = None
+        out.append((fs.readlink(p), dest))
+    return out
+
+
 def peek(fs, p):  # attrs of whatever is at p (links not followed), None if nothing is; a lost link is no answer
     try:
         return fs.stat(p, follow=False)
@@ -299,18 +319,9 @@ def peek(fs, p):  # attrs of whatever is at p (links not followed), None if noth
 
 
 def look(fs, d):  # a folder's entries, each link with its target and what it points to (dest; None: nothing)
-    out = []
-    for n, a in fs.listdir(d):
-        if islink(a):
-            a = {**a, "target": fs.readlink(join(d, n))}
-            try:
-                a["dest"] = fs.stat(join(d, n))
-            except ConnectionError:
-                raise
-            except OSError:
-                a["dest"] = None
-        out.append((n, a))
-    return out
+    items = fs.listdir(d)
+    got = iter(fs.links([join(d, n) for n, a in items if islink(a)]))
+    return [(n, {**a, **dict(zip(("target", "dest"), next(got)))} if islink(a) else a) for n, a in items]
 
 
 def complete(fs, base, t):  # what path t (typed from folder base) can go on to: names there that start like it,
@@ -419,19 +430,20 @@ def save(fs, p, data):  # p's content replaced at once (never half-written), its
     fs.rename(p + PART, p)
 
 
-def copy(src, sp, dst, dp, tick, follow=False):
+def copy(src, sp, dst, dp, tick, follow=False, ask=None):
     """src:sp -> dst:dp, a file or a tree, like cp -pP: content, mode and times travel; a link travels as a link
     (follow: what it points to instead). The source is looked at now, never trusted from an older listing. Each file
     lands as NAME.rshm-part, resumed if one is there, renamed into place when complete; a file it replaces takes the
     source's mode. tick(path, at, resumed) reports progress; tick.finished holds what already made it, so a retry
-    after a dropped link skips it; tick.skipped gets the pipes, sockets and devices of a tree, which are never opened.
+    after a dropped link skips it; tick.skipped gets the pipes, sockets and devices of a tree, which are never opened,
+    and what ask(path, new, old) declined to replace (no ask: everything is replaced).
     Within one host the server copies by itself where it can (OpenSSH 9.0+), else a second session reads: one
     session's reads in flight would block its writes."""
     one = src is dst and isinstance(src, Remote)
     here = one and b"copy-data" in src.sftp().ext
     reader = src.twin() if one and not here else src
     try:
-        _copy(reader, sp, dst, dp, tick, reader.stat(sp, follow), None, here)
+        _copy(reader, sp, dst, dp, tick, reader.stat(sp, follow), None, here, ask)
     finally:
         if reader is not src:
             reader.close()
@@ -441,15 +453,21 @@ def keep(a):  # what a copy carries over, like cp -p: mode (no setuid) and modif
     return {"perm": a.get("perm", 0o644) & 0o777} | ({"mtime": a["mtime"]} if "mtime" in a else {})
 
 
-def _copy(src, sp, dst, dp, tick, a, there, here):
+def _copy(src, sp, dst, dp, tick, a, there, here, ask):
     name = dp.rsplit("/", 1)[-1]
     old = there.get(name) if there is not None else peek(dst, dp)
+    if special(a):
+        raise OSError(f"{sp}: not a regular file")
+    if not isdir(a):
+        if sp in tick.finished:
+            return
+        if old and not isdir(old) and ask and not ask(dp, a, old):
+            return tick.skipped.append(sp)
     if islink(a):
         if old and not isdir(old):
             dst.unlink(dp)
-        return dst.symlink(a.get("target") or src.readlink(sp), dp)
-    if special(a):
-        raise OSError(f"{sp}: not a regular file")
+        dst.symlink(a.get("target") or src.readlink(sp), dp)
+        return tick.finished.add(sp)  # (a retry finds it there: done, not a file to ask about)
     if isdir(a):
         try:
             dst.mkdir(dp)
@@ -464,15 +482,13 @@ def _copy(src, sp, dst, dp, tick, a, there, here):
             if special(b):
                 tick.skipped.append(join(sp, n))
             else:
-                _copy(src, join(sp, n), dst, join(dp, n), tick, b, there, here)
+                _copy(src, join(sp, n), dst, join(dp, n), tick, b, there, here, ask)
         try:  # the folder's own mode and time, once its content is in
             dst.chattr(dp, keep(a))
         except ConnectionError:
             raise
         except OSError:  # a folder not yours keeps its own
             pass
-        return
-    if sp in tick.finished:
         return
     if old and islink(old):  # write through a link, like cp: the link stays, its target gets the new content
         dp, there = dst.realpath(dp), None

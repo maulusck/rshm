@@ -57,7 +57,7 @@ STYLE = {"b": curses.A_BOLD, "d": curses.A_DIM}
 NAMES = {"Enter": (10, 13, curses.KEY_ENTER), "→": (curses.KEY_RIGHT,), "←": (curses.KEY_LEFT,), "Space": (32,),
          "Bksp": (curses.KEY_BACKSPACE, 127, 8), "Del": (curses.KEY_DC,), "Ins": (curses.KEY_IC,),
          "Tab": (9, curses.KEY_BTAB),
-         "Esc": (27,), **{f"^{c}": (ord(c) - 64,) for c in "FLORU"}, **{f"F{i}": (curses.KEY_F0 + i,) for i in range(1, 11)}}
+         "Esc": (27,), **{f"^{c}": (ord(c) - 64,) for c in "CFLORU"}, **{f"F{i}": (curses.KEY_F0 + i,) for i in range(1, 11)}}
 MENUS = ("Pane 1", "File", "Mark", "Command", "Options", "Pane 2")
 KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under both pane menus; no menu: help only
     ("File", "Enter → l", "open", "open"), ("File", "← h Bksp", "parent directory", "parent"),
@@ -65,7 +65,7 @@ KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under bo
     ("File", "F5 c", "copy to other pane", "copy"), ("File", "F6 m", "move to other pane", "move"),
     ("File", "F7 n", "mkdir", "mkdir"), ("File", "F8 x Del", "delete", "delete"), ("File", "R", "rename", "rename"),
     ("File", "A", "mode, owner, time", "chattr"), ("File", "L", "symbolic link (on a link: change target)", "symlink"),
-    ("File", "H", "hard link", "hardlink"), ("File", "P", "pack into an archive", "pack"),
+    ("File", "H", "hard link", "hardlink"), ("File", "P", "pack (on an archive: unpack)", "pack"),
     ("File", "z", "disk usage", "size"),
     ("Mark", "Space Ins", "mark", "mark"), ("Mark", "*", "mark all / none", "markall"),
     ("Mark", "+", "mark by pattern", "markpat"), ("Mark", "-", "unmark by pattern", "unmarkpat"),
@@ -79,15 +79,15 @@ KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under bo
     ("Command", "F2", "menu", "menu"), ("Command", "^O s", "shell", "shell"), ("Command", "p", "check host", "ping"),
     ("Options", "F9", "pulldown menus", "menubar"), ("Options", "t", "theme", "theme"),
     ("Options", "[ ]", "scroll log", "logscroll"), ("Options", "", "edit config (F4 on host list)", "editcfg"),
-    ("Options", "^L", "redraw", "draw"), ("Options", "F1 ?", "help", "help"), ("Options", "F10 q", "quit", "quit"),
+    ("Options", "^L", "redraw", "draw"), ("Options", "F1 ?", "help", "help"), ("Options", "F10 q ^C", "quit", "quit"),
     (None, "↑ ↓ j k PgUp PgDn Home End", "move cursor", None), (None, "click, click again", "select, open", None),
     (None, "right-click", "menu (F2)", None), (None, "wheel", "scroll", None),
 ]
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 VERBS = {"copy": ("copying", "copied"), "move": ("moving", "moved"), "delete": ("deleting", "deleted"),  # each operation,
          "mkdir": ("creating", "created"), "rename": ("renaming", "renamed"), "link": ("linking", "linked"),  # as it runs
-         "change": ("changing", "changed"), "save": ("saving", "saved"),  # and as the log
-         "pack": ("packing", "packed")}  # keeps it
+         "change": ("changing", "changed"), "save": ("saving", "saved"), "pack": ("packing", "packed"),  # and as
+         "unpack": ("unpacking", "unpacked")}  # the log keeps it
 LONG = 0.5  # s: an action running longer shows itself (its log line, the box); keys typed meanwhile are dropped
 HEAD = 1 << 20  # rshm's viewer shows a file's first HEAD bytes; its editor takes files up to HEAD
 ORDER = {"name": lambda x: x[0].casefold(), "extension": lambda x: (posixpath.splitext(x[0])[1].casefold(), x[0]),
@@ -188,9 +188,8 @@ class Pane:  # a folder on some file system, or the host list to pick one
 
 
 class App:
-    def __init__(s, scr, cfg, note="", extra=()):  # note: what the start had to say (a TERM drawn as another);
-        s.cfg, s.scr, s.msg, s.typing = cfg, window(scr), "", None  # extra: destinations named at the start, in no list
-        s.extra = config.tree({n: config.dest(n) for n in extra})
+    def __init__(s, scr, cfg, note=""):  # note: what the start had to say (a TERM drawn as another)
+        s.cfg, s.scr, s.msg, s.typing, s.extra = cfg, window(scr), "", None, {}  # extra: destinations in no list
         s.panes, s.focus, s.rects, s.single, s.spans, s.opened = [Pane(), Pane()], 0, [], False, {}, None  # opened: menu
         s.local, s.remotes, s.hosts, s.c, s.cmds, s.theme_name, s.shown = Local(), {}, {}, {}, {}, "default", ""
         s.dots, s.order, s.rev = True, "name", False
@@ -451,8 +450,10 @@ class App:
         if keep:
             p.files.sel = next((i for i, r in enumerate(p.files.rows) if r[0] == keep), p.files.sel)
 
-    def relist(s):  # both panes, after anything that may have changed what they show; find results keep only
-        for p in s.panes:  # what's still there
+    def relist(s, *fss):  # the panes on these file systems, after anything that may have changed what they show; find
+        for p in s.panes:  # results keep only what's still there
+            if p.fs not in fss:
+                continue
             if p.found:
                 p.items = [(n, a) for n, a in p.items if not a or peek(p.fs, join(p.cwd, n))]
                 s.sync(p)
@@ -518,14 +519,17 @@ class App:
             raise
         return d, lp
 
-    def enter(s, p, name, a):  # an archive, browsed like a folder; one not on this machine comes over first
-        d, lp = (None, join(p.cwd, name)) if isinstance(p.fs, Local) else s.fetch(p, name, a)
+    def archive(s, p, name, a):  # an archive in p's folder, read -> (Archive, the private copy's folder or None): one
+        d, lp = (None, join(p.cwd, name)) if isinstance(p.fs, Local) else s.fetch(p, name, a)  # not here comes over
         try:
             s.busy(f"reading {name}")
-            ar = Archive(lp, f"{p.fs.name}:{join(p.cwd, name)}")
+            return Archive(lp, f"{p.fs.name}:{join(p.cwd, name)}"), d
         except BaseException:
             d and shutil.rmtree(d, ignore_errors=True)
             raise
+
+    def enter(s, p, name, a):  # an archive, browsed like a folder
+        ar, d = s.archive(p, name, a)
         if not p.up:
             p.remember()
         p.up.append((p.fs, p.cwd, name, d))
@@ -554,6 +558,15 @@ class App:
         elif p.fs:
             p.mode = "files"
 
+    def reach(s, p, name):  # pane p on the host called name (as `rshm NAME` takes it): one in the list, else a destination
+        m = config.find(s.hosts, name)
+        if len(m) > 1:
+            raise OSError(f"ambiguous host {name!r}: {', '.join('/'.join(x) for x, _ in m)}")
+        if not m:  # kept through reloads, for this run
+            s.extra[name] = s.hosts[name] = config.dest(name)
+        s.pick(p, m[0][0] if m else (name,))
+        s.open_host(p, p.cur()[2])
+
     def pick(s, p, path):  # select the host at path in p's list, unfolding the groups around it
         p.closed -= {path[:i] for i in range(1, len(path))}
         s.sync(p)
@@ -576,7 +589,10 @@ class App:
     def path(s, p, x):  # a typed path: as is from / or ~, else from the pane's folder
         return x if x[:1] in ("/", "~") else join(p.cwd, x)
 
-    def goto(s):
+    def goto(s):  # on the host list: a host by name, or any ssh destination (me@box, box:/srv)
+        if s.P.mode == "hosts":
+            name = s.ask("connect to:")
+            return name and s.reach(s.P, name)
         p = s.folder()
         d = s.ask("go to:", p.cwd, p.fs, p.cwd)
         if d:
@@ -780,7 +796,7 @@ class App:
                 editor.edit(s.scr, data, title, s.C, lambda b: s.op("save", f"{name} in {s.where(p)}",
                                                                     lambda: save(p.fs, path, b)))
         if how == "edit":
-            s.relist()
+            s.relist(p.fs)
 
     def contents(s, p, path, end, off=0):  # bytes off..end of a file, read with progress; Esc stops it
         s.busy(f"loading {posixpath.basename(path)}")
@@ -795,7 +811,7 @@ class App:
         path = join(p.cwd, name)
         if isinstance(p.fs, Local):
             s.term(["sh", "-c", config.cmdline(template, path)], p.cwd)
-            return s.relist()
+            return s.relist(p.fs)
         d, lp = s.fetch(p, name, a)
         keep = False  # the copy is removed afterwards, unless it holds an edit that couldn't be saved
         try:
@@ -811,7 +827,7 @@ class App:
                         why = reason(e) if isinstance(e, OSError) else "stopped"
                         raise OSError(f"{why}; edit kept in {lp}") from None
                 s.op("save", f"{name} in {s.where(p)}", send)
-                s.relist()
+                s.relist(p.fs)
         finally:
             if not keep:
                 shutil.rmtree(d, ignore_errors=True)
@@ -835,63 +851,96 @@ class App:
         dst = s.ask(f"{'move' if move else 'copy'} {what} to {o.fs.name}:", o.cwd, o.fs, o.cwd)
         if not dst:
             return
-        dst = dst if dst.startswith("/") else join(o.cwd, dst)
-        at = peek(o.fs, dst)
+        try:
+            s.send("move" if move else "copy", p.fs, p.cwd, items, o.fs, s.path(o, dst), what)
+        finally:
+            p.marks -= {n for n, _ in items}
+
+    def send(s, verb, src, d, items, dfs, dst, what):  # copy or move items (names in folder d of src) to dst on dfs:
+        at = peek(dfs, dst)                              # into it when it is a folder, else a new name for the one entry
         if at and islink(at):
-            at = peek(o.fs, o.fs.realpath(dst))
+            at = peek(dfs, dfs.realpath(dst))
         if at and isdir(at):  # into that folder (find results land flat, by their own names)
-            there = dict(o.fs.listdir(dst))
             pairs = [(n, a, join(dst, n.rsplit("/", 1)[-1])) for n, a in items]
-        elif len(items) == 1 and not at:  # a new name for the one entry
-            there, pairs = {}, [(items[0][0], items[0][1], dst)]
+        elif len(items) == 1:  # a new name for the one entry (or a file of that name, replaced if you say so)
+            pairs = [(items[0][0], items[0][1], dst)]
         else:
             raise OSError(f"{dst}: not a directory")
-        same = o.fs is p.fs
+        move, same = verb == "move", dfs is src
         if same:  # by real paths: "a/../b" or a link into the tree mustn't get past these
-            real = lambda t: join(o.fs.realpath(posixpath.dirname(t)), posixpath.basename(t))
-            src = {n: p.fs.realpath(join(p.cwd, n)) for n, _, _ in pairs}
-            pairs = [x for x in pairs if real(x[2]) != src[x[0]]]  # onto itself: nothing to do
-            if any(real(t).startswith(src[n] + "/") for n, _, t in pairs):
+            real = lambda t: join(dfs.realpath(posixpath.dirname(t)), posixpath.basename(t))
+            was = {n: src.realpath(join(d, n)) for n, _, _ in pairs}
+            pairs = [x for x in pairs if real(x[2]) != was[x[0]]]  # onto itself: nothing to do
+            if any(real(t).startswith(was[n] + "/") for n, _, t in pairs):
                 raise OSError("cannot copy a directory into itself")
         if not pairs:
             raise OSError("source and destination are the same")
         if len({t for *_, t in pairs}) < len(pairs):  # find results from different folders, one name
             raise OSError("duplicate names in selection")
-        clash = {n for n, _, t in pairs if t.rsplit("/", 1)[-1] in there}
-        more = f" and {len(clash) - 1} more" if len(clash) > 1 else ""
-        if clash and not s.confirm(f"overwrite {min(clash)}{more} (directories merge)? (y/N)"):
-            return
-        kept, names = [], {n for n, _, _ in pairs}  # kept: moved trees holding pipes, sockets or devices stay
+        kept, ask = [], s.replacer()  # kept: moved entries not all of which went (declined, or pipes and devices)
 
         def body():
             if move and same:  # one file system: a rename, nothing travels; only a folder merge needs copies
-                for n, a, t in [x for x in pairs if not (x[0] in clash and isdir(x[1]))]:
+                for n, a, t in list(pairs):
+                    old = peek(dfs, t)
+                    if old and isdir(old) and isdir(a):
+                        continue
                     s.busy(s.doing, None, n)
-                    p.fs.rename(join(p.cwd, n), t)
+                    if not old or ask(t, a, old):
+                        src.rename(join(d, n), t)
+                    else:
+                        kept.append(n)
                     pairs.remove((n, a, t))
             if not pairs:
-                return ""
-            total = s.measure(p.fs, p.cwd, [(n, a) for n, a, _ in pairs])[0]  # ponytail: one listing pass first, for
-            # a whole to measure progress and time left against; incremental counting if huge trees make it wait
+                return s.declined(ask, kept)
+            total = s.measure(src, d, [(n, a) for n, a, _ in pairs])[0]  # ponytail: one listing pass first, for a
+            # whole to measure progress and time left against; counting as it goes would show no % and no time left
             gone = set()  # moved entries already removed at the source: a retry skips them
 
             def run(tick):
                 for n, a, t in pairs:
                     if n not in gone:
                         skips = len(tick.skipped)
-                        copy(p.fs, join(p.cwd, n), o.fs, t, tick)
+                        copy(src, join(d, n), dfs, t, tick, ask=ask)
                         if move and len(tick.skipped) > skips:
                             kept.append(n)
                         elif move:
-                            rm(p.fs, join(p.cwd, n))
+                            rm(src, join(d, n))
                         gone.add(n)
-            return s.xfer(run, s.doing, total, [p.fs, o.fs]) + \
-                (f"; {', '.join(kept)} kept (contains pipes, sockets or devices)" if kept else "")
+            return s.xfer(run, s.doing, total, [src, dfs]) + s.declined(ask, kept)
         try:
-            s.op("move" if move else "copy", f"{what} to {o.fs.name}:{dst}", body)
+            s.op(verb, f"{what} to {dfs.name}:{dst}", body)
         finally:
-            p.marks -= names
-            s.relist()
+            s.relist(src, dfs)
+
+    @staticmethod
+    def declined(ask, kept):  # what a copy or move left as it was, for its log line
+        return "".join((f"; {many(len(ask.no), 'file')} not replaced" if ask.no else "",
+                        f"; {', '.join(kept)} kept at the source" if kept else ""))
+
+    def replacer(s):  # -> ask(path, new, old): replace old at path with new? Asked file by file, mc's way:
+        rule, said = [None], {}  # y n, a all, s none, u all where newer; Esc stops. A retry asks nothing twice
+        when = lambda a: time.strftime("%Y-%m-%d %H:%M", time.localtime(a.get("mtime", 0)))
+
+        def ask(path, new, old):
+            if path in said:
+                return said[path]
+            if rule[0] is None:
+                k = s.keypress(f"replace {posixpath.basename(path)} ({human(old.get('size', 0))}, {when(old)}) with "
+                               f"{human(new.get('size', 0))}, {when(new)}?   y n   a all   s none   u newer")
+                if k in (27, 3):
+                    raise KeyboardInterrupt
+                k = chr(k) if 0 < k < 256 else "n"
+                rule[0] = k if k in "asu" else None
+                yes = k in "yY"
+            if rule[0]:
+                yes = rule[0] == "a" or rule[0] == "u" and new.get("mtime", 0) > old.get("mtime", 0)
+            said[path] = yes
+            if not yes:
+                ask.no.add(path)
+            return yes
+        ask.no = set()
+        return ask
 
     def mkdir(s):
         p = s.folder()
@@ -913,7 +962,7 @@ class App:
             try:
                 s.op("delete", f"{what} in {s.where(p)}", body)
             finally:
-                s.relist()  # show what's left even if it stopped halfway
+                s.relist(p.fs)  # show what's left even if it stopped halfway
 
     def rename(s):  # never overwrites; "sub/", "sub/x" or "/abs/x" move it on this file system, like mv
         p = s.folder()
@@ -939,7 +988,7 @@ class App:
                     p.fs.symlink(to, path + PART)
                     p.fs.rename(path + PART, path)
                 s.op("link", f"{c[0]} -> {to} in {s.where(p)}", swap)
-                s.relist()
+                s.relist(p.fs)
         else:
             s.link("symlink")
 
@@ -964,7 +1013,7 @@ class App:
             s.op("link", f"{new} -> {to} in {p.fs.name}:{d}", lambda: p.fs.symlink(to, at))
         else:
             s.op("link", f"{new} to {src} in {p.fs.name}:{d}", lambda: p.fs.hardlink(src, at))
-        s.relist()
+        s.relist(p.fs)
 
     def owner_id(s, p, key, name):  # a user or group name as its number: on a host, as its files show it
         what = {"uid": "user", "gid": "group"}[key]
@@ -1004,15 +1053,17 @@ class App:
                 for n, _ in items:
                     p.fs.chattr(join(p.cwd, n), ch)
             s.op("change", f"{entries(items)} in {s.where(p)}: {', '.join(done)}", apply)
-            s.relist()
+            s.relist(p.fs)
 
     def pack(s):  # P: the marked entries (or the one under the cursor) into a new archive in the other pane's folder,
-        p, o = s.folder(), s.O  # its kind by the name you give it; from anywhere to anywhere, as a copy goes
+        p, o = s.folder(), s.O  # its kind by the name you give it; an archive under the cursor, nothing marked: unpacked
         items = p.targets()
         if not items:
             return
         if o.mode != "files" or isinstance(o.fs, Archive):
             raise OSError("other pane: no directory" if o.mode != "files" else "read-only archive")
+        if not p.marks and not folder(items[0][1]) and items[0][0].lower().endswith(ARCHIVES):
+            return s.unpack(p, o, *items[0])
         what = entries(items)
         base = posixpath.basename(items[0][0] if len(items) == 1 else p.cwd) or "archive"
         at = s.ask(f"pack {what} as:", join(o.cwd, f"{base}.tar.gz"), o.fs, o.cwd)
@@ -1055,7 +1106,25 @@ class App:
             s.op("pack", f"{what} into {o.fs.name}:{at}", body)
         finally:
             p.marks -= {n for n, _ in items}
-            s.relist()
+            s.relist(o.fs)
+
+    def unpack(s, p, o, name, a):  # what an archive holds, into the other pane: one entry at its top lands as itself,
+        ar, d = s.archive(p, name, a)  # more go into a folder named after the archive; replacing asks, file by file
+        try:
+            top = ar.listdir("/")
+            if not top:
+                raise OSError(f"{name}: empty archive")
+            stem = name[:-max((len(e) for e in ARCHIVES if name.lower().endswith(e)))]
+            dst = s.ask(f"unpack {name} to {o.fs.name}:", o.cwd if len(top) == 1 else join(o.cwd, stem), o.fs, o.cwd)
+            if not dst:
+                return
+            dst = s.path(o, dst)
+            if len(top) > 1 and not peek(o.fs, dst):
+                o.fs.mkdir(dst)
+            s.send("unpack", ar, "/", top, o.fs, dst, name)
+        finally:
+            ar.close()
+            d and shutil.rmtree(d, ignore_errors=True)
 
     def size(s):  # z: the size of the marked entries, or of the one under the cursor (a folder: all inside it)
         p = s.folder()
@@ -1097,7 +1166,7 @@ class App:
     def run(s, fs, script, d):  # a shell command on that machine, on the terminal; then show what changed
         cmd, cwd = fs.run(script, d)
         s.term(cmd, cwd)
-        s.relist()
+        s.relist(fs)
 
     def shell(s):  # ^O: a shell in this folder; on the host list, on the host under the cursor
         p = s.P
@@ -1178,9 +1247,10 @@ class App:
                 s.focus = int(MENUS[i][-1]) - 1
             s.act(getattr(s, rows[r][3]))
 
-    def quit(s):  # asked once; the same key again (q q, F10 F10) says yes
-        if s.confirm("quit? (y/N)", (ord("q"), curses.KEY_F10)):
-            sys.exit()
+    def quit(s):  # asked once; the key again (q q, F10 F10, ^C ^C) says yes, ^C the way ^C ends a program
+        k = s.keypress("quit? (y/N)")
+        if k in (ord("y"), ord("Y"), ord("q"), curses.KEY_F10, 3):
+            sys.exit(130 if k == 3 else 0)
 
     # --- prompts ---
     def ask(s, q, text="", fs=None, base=""):  # the one-line input at the bottom, over the current screen; a path's:
@@ -1188,16 +1258,21 @@ class App:
             return (readline(s.scr, q, text, s.C["acc"] | curses.A_BOLD, s.paint,
                              fs and (lambda t: complete(fs, base, t))) or "").strip()
 
-    def confirm(s, q, yes=()):  # one key: y (or one of yes) says yes, anything else no
-        s.typing = q
+    def keypress(s, q):  # a question on the bottom line -> the key that answers it (^C: 3); the clock stands still
+        s.typing, t = q, time.monotonic()
         try:
             with s.still():
                 s.paint()
-                return s.scr.getch() in (ord("y"), ord("Y"), *yes)
+                while (k := s.scr.getch()) == curses.KEY_RESIZE:  # a new size is no answer
+                    s.paint()
+                return k
         except KeyboardInterrupt:
-            return False
+            return 3
         finally:
-            s.typing = None
+            s.typing, s.held = None, s.held + time.monotonic() - t
+
+    def confirm(s, q, yes=()):  # one key: y (or one of yes) says yes, anything else no
+        return s.keypress(q) in (ord("y"), ord("Y"), *yes)
 
     def anchor(s):  # where a popup opens: at the cursor's row
         v = s.P.v
@@ -1519,19 +1594,24 @@ class App:
                 for k in reversed(ahead):
                     curses.ungetch(k)
 
-    def loop(s, start=()):  # start: host paths; one opens in the right pane, two in both
+    def loop(s, start=()):  # start: host names; one opens in the right pane, two in both
         if not start:
             s.act(s.open_host, s.panes[0], LOCAL)
-        for i, path in enumerate(start, 2 - len(start)):
+        for i, name in enumerate(start, 2 - len(start)):
             s.focus = i
-            s.pick(s.P, path)
-            s.act(s.open)
+            s.act(s.reach, s.P, name)
         if len(start) == 1:
             s.act(s.open_host, s.panes[0], LOCAL)
         while True:
-            s.paint()
-            c = s.scr.getch()  # Ctrl-C here (idle) quits
-            s.act(s.key, c)
+            s.once()
+
+    def once(s):  # one key, read and done
+        s.paint()
+        try:
+            c = s.scr.getch()
+        except KeyboardInterrupt:  # ^C here (idle): as q, it asks
+            c = 3
+        s.act(s.key, c)
 
 
 def lcwd():  # the local folder, by the name the shell gave it ($PWD: through links); if someone removed it, home

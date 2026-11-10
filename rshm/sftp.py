@@ -224,6 +224,27 @@ class SFTP:  # one session on the host's master: no remote shell, exact byte nam
         r.u32()
         return r.str().decode(errors="surrogateescape")
 
+    def links(s, ps):  # -> [(target, attrs of what it points to, None if nothing)] for links ps: WINDOW asked at once
+        q, out, ps = deque(), [], iter(ps)
+        try:
+            while True:
+                while len(q) < WINDOW and (p := next(ps, None)) is not None:
+                    q.append((s.req(19, p), s.req(17, p)))  # READLINK, STAT
+                if not q:
+                    return out
+                r = s.wait(q[0][0])
+                r.u32()
+                try:
+                    dest = s.wait(q[0][1]).attrs()
+                except ConnectionError:
+                    raise
+                except OSError:
+                    dest = None
+                out.append((r.str().decode(errors="surrogateescape"), dest))
+                q.popleft()
+        finally:  # an error midway: the replies still coming are nobody's
+            s.forget(i for pair in q for i in pair)
+
     def symlink(s, target, p):  # ponytail: OpenSSH's order, not the draft's; check the server's if another shows up
         s.make(p, 20, target, p)
 

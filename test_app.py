@@ -190,8 +190,7 @@ def more(app, *keys):  # the same rshm, more keys
     SCR.keys.extend(k for ks in keys for k in ([*ks] if isinstance(ks, str) and ks != "^C" else [ks]))
     try:
         while True:
-            app.paint()
-            app.act(app.key, SCR.getch())
+            app.once()
     except (Done, SystemExit):
         pass
     app.paint()
@@ -320,8 +319,8 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     assert "jail" in log(app) or "Permission" in log(app)
     more(app, "c", "\x15", str(W), "\n")  # onto itself
     assert "are the same" in log(app)
-    more(app, "c", "\x15", str(W / "bin.dat"), "\n")
-    assert "bin.dat: not a directory" in log(app)
+    more(app, "c", "\x15", str(W / "bin.dat"), "\n", "n")  # onto a file: replace it? no
+    assert "a.txt to local:" in log(app) and "; 1 file not replaced" in log(app) and (W / "bin.dat").stat().st_size == 5120
     more(app, "c", "\x15", str(W / "nope" / "x"), "\n")
     assert "No such file" in log(app)
     (W / "sub" / "a.txt").write_text("other")
@@ -394,12 +393,44 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     assert app.P.cwd == str(W) and app.P.cur()[0] == "lnd", (app.P.cwd, app.P.cur())
     more(app, "q", "n")  # q asks; anything but y (or q again) stays
     assert app.P.cwd == str(W)
-    SCR.keys.append("q")  # q again: yes
-    try:
-        app.quit()
-        raise AssertionError("still running")
-    except SystemExit:
-        pass
+    for k, code in (("q", 0), ("^C", 130)):  # the key again: yes; ^C ^C ends it as ^C ends a program
+        SCR.keys.append(k)
+        try:
+            app.quit()
+            raise AssertionError("still running")
+        except SystemExit as e:
+            assert (e.code or 0) == code, (k, e.code)
+    more(app, "^C", "n")  # ^C idle: asked, as q
+    assert app.P.cwd == str(W)
+    more(app, "\x1b", "/s.zip", "\n", "P", "\x15", *str(W / "un"), "\n")  # P on an archive: unpacked; its one top
+    assert (W / "un" / "bin.dat").read_bytes() == (W / "sub" / "bin.dat").read_bytes()  # folder lands as itself, renamed
+    assert re.search(r"✓ unpacked s\.zip to local:\S+/un  ", log(app)), log(app)
+    (W / "sub" / "bin.dat").write_bytes(b"newer here")
+    more(app, "P", "\n", "s")  # into this folder: sub/ there already, merged; replacing bin.dat asked: s, none of them
+    assert (W / "sub" / "bin.dat").read_bytes() == b"newer here" and "s.zip to local:" in log(app)
+    assert re.search(r"0B in 0s; \d files not replaced$", log(app)), log(app)
+    more(app, "P", "\n", "u")  # u: only where the archive's is newer (it isn't)
+    assert (W / "sub" / "bin.dat").read_bytes() == b"newer here"
+    more(app, "P", "\n", "\x1b")  # Esc: stopped
+    assert log(app).endswith(": stopped")
+    more(app, "P", "\n", "a")  # a: all of them
+    assert (W / "sub" / "bin.dat").read_bytes() == (W / "un" / "bin.dat").read_bytes()
+    with zipfile.ZipFile(W / "two.tar.zip", "w") as z:  # more than one entry at its top: a folder named after it
+        z.writestr("x", "x")
+        z.writestr("y", "y")
+    more(app, "\x1b", "r", "/two.tar", "\n", "P", "\n")
+    assert (W / "two.tar" / "y").read_text() == "y"
+    (W / "x1").write_text("new")
+    (W / "sub" / "x1").write_text("old")
+    more(app, "\x1b", "r", "/x1", "\n", "m", "\x15", str(W / "sub"), "\n", "n")  # a move asked no: it stays where it was
+    assert (W / "x1").exists() and (W / "sub" / "x1").read_text() == "old" and log(app).endswith("; x1 kept at the source")
+    more(app, "m", "\x15", str(W / "sub"), "\n", "y")
+    assert not (W / "x1").exists() and (W / "sub" / "x1").read_text() == "new"
+    more(app, "\x1b", "@", "g", *"me@box:/srv", "\n")  # g on the host list: any destination, in the list from then on
+    assert app.hosts["me@box:/srv"] == {"host": "me@box", "path": "/srv"} and app.P.mode == "hosts"
+    assert app.P.cur()[1] == "me@box:/srv"
+    more(app, "r", "g", "\n", "\x1b")
+    assert "me@box:/srv" in app.hosts  # kept through a reload
     ui.connect = lambda *a, **k: None  # a host that's logged in but doesn't answer
     CFG.write_text('[hosts]\ng = ["nohost"]\n')
     more(app, "r", "@", "/nohost", "\n", "p", "\x1b", "\x1b", "/", ("err",), "x", "\n", "\x1b")
@@ -624,7 +655,7 @@ for run in range(int(os.environ.get("RSHM_MONKEY", 40))):
         script.append(("size", rnd.randrange(1, 60), rnd.randrange(1, 200)) if r < .03 else
                       (rnd.randrange(30), rnd.randrange(120), rnd.choice([CLICK, RIGHT, UP, DOWN])) if r < .12 else
                       rnd.choice(keys))
-    app = start(*[k for k in script if k not in ("q", K.F10)])
+    app = start(*[k for k in script if k not in ("q", K.F10, "\x03")])  # (quit: asked, then a y would end the run)
     os.chdir(BOX)
     app.cleanup()
     bad = [ln for ln in app.log if re.search(rf"✗ ({'|'.join(TYPES)}): ", ln)]

@@ -59,24 +59,20 @@ def main():
         ap.error(config.unread(cfg))
     if len(a.host) > 2:
         ap.error("at most two hosts")
-    start, extra = [], []  # extra: destinations in no list
-    if a.host:  # resolved before the screen opens: an ambiguous name is a plain error
+    if a.host:  # checked before the screen opens: a broken config or an ambiguous name is a plain error
         try:
             hs = config.hosts(config.read(cfg))
         except OSError as e:
             ap.error(f"{cfg}: {e}")
         for name in a.host:
-            m = config.find(hs, name)
-            if len(m) > 1:
+            if len(m := config.find(hs, name)) > 1:
                 ap.error(f"ambiguous host {name!r}: {', '.join('/'.join(p) for p, _ in m)}")
-            start.append(m[0][0] if m else (name,))  # in no list: a destination of its own, ssh finds it
-            extra += [] if m else [name]
     for sig in (signal.SIGTERM, signal.SIGHUP):  # kill or a closed terminal unwind normally: terminal and logins cleaned
         signal.signal(sig, lambda n, _: sys.exit(128 + n))
     note = terminal()
     atexit.register(logout)
     try:
-        curses.wrapper(lambda scr: App(scr, cfg, note, extra).loop(start))
+        curses.wrapper(lambda scr: App(scr, cfg, note).loop(a.host))
     except KeyboardInterrupt:
         pass
     except curses.error as e:
