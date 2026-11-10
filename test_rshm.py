@@ -520,6 +520,8 @@ os.chmod(src / "sub" / "a.txt", 0o751)
 os.utime(src / "sub" / "a.txt", (1_000_000_000, 1_000_000_000))
 (src / "big.bin").write_bytes(os.urandom(300_000))
 for ext in fs.ARCHIVES:
+    if ext in fs.SINGLE:  # one file only, below
+        continue
     tick = lambda p, at: seen.__setitem__(p, at)
     seen, tick.skipped = {}, []
     out = str(d / f"p{ext}")
@@ -536,6 +538,26 @@ for ext in fs.ARCHIVES:
     pa.close()
     with zipfile.ZipFile(d / "re.zip") as zf:
         assert zf.read("sub/a.txt") == b"AAA" and zf.getinfo("sub/").is_dir()
+for ext in fs.SINGLE:  # x.gz, x.bz2, x.xz: one file, packed, browsed and read as the file it holds; damage reported
+    out, tick.skipped = str(d / f"big.bin{ext}"), []
+    fs.pack(fs.Local(), str(src), [("big.bin", fs.Local().stat(str(src / "big.bin")))], out, tick)
+    one = fs.Archive(out, "x")
+    assert [(n, a["size"]) for n, a in one.listdir("/")] == [("big.bin", 300_000)] and fs.single(out) and not fs.single("a.tar.gz")
+    assert b"".join(one.read("/big.bin", 1000, 300_000)) == (src / "big.bin").read_bytes()[1000:]
+    one.close()
+    blob = bytearray(Path(out).read_bytes())
+    blob[len(blob) // 2] ^= 0xFF
+    Path(out).write_bytes(blob)
+    try:
+        fs.Archive(out, "x")
+        raise AssertionError("damage passed on")
+    except OSError as e:
+        assert "unreadable archive" in str(e), e
+    try:
+        fs.pack(fs.Local(), str(d), [("srcdir", fs.Local().stat(str(src)))], out, tick)
+        raise AssertionError("a folder in one file")
+    except OSError as e:
+        assert f"holds one file; for more, name it .tar{ext}" in str(e), e
 inner = str(src / "sub" / ("in.tar" + fs.PART))  # packed into the very tree it packs: never itself
 fs.pack(fs.Local(), str(src), [("sub", fs.Local().stat(str(src / "sub")))], inner, tick)
 with tarfile.open(inner) as tf:

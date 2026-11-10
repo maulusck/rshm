@@ -14,7 +14,8 @@ between any two.
 attrs: {"size", "perm", "mtime", "uid", "gid", "user", "group", "nlink"}, each only when known; look() adds a link's
 "target" and "dest" (what it points to; None when nothing).
 """
-import contextlib, functools, grp, itertools, lzma, os, posixpath, pwd, re, shlex, stat, tarfile, time, zipfile, zlib
+import bz2, contextlib, functools, grp, gzip, itertools, lzma, os, posixpath, pwd, re, shlex, stat, tarfile, time
+import zipfile, zlib
 from collections import defaultdict
 
 from .sftp import CHUNK, SFTP
@@ -22,7 +23,16 @@ from .ssh import argv, connect
 
 PART = ".rshm-part"  # a file in transit: resumed from, renamed into place once complete
 TARS = {".tar": "", ".tgz": "gz", ".tar.gz": "gz", ".tbz2": "bz2", ".tar.bz2": "bz2", ".txz": "xz", ".tar.xz": "xz"}
-ARCHIVES = (".zip", ".jar", *TARS)  # what rshm browses and packs, by name
+SINGLE = {".gz": gzip, ".bz2": bz2, ".xz": lzma}  # one file, compressed (a tar's names are matched first)
+ARCHIVES = (".zip", ".jar", *TARS, *SINGLE)  # what rshm browses and packs, by name
+
+
+def tarred(name):  # the compression of a tar called name: "" none, "gz" "bz2" "xz"; None: not a tar
+    return next((m for e, m in TARS.items() if name.lower().endswith(e)), None)
+
+
+def single(name):  # the module that compresses a lone file called name (x.log.gz), None if it isn't one
+    return None if tarred(name) is not None else next((m for e, m in SINGLE.items() if name.lower().endswith(e)), None)
 BROKEN = (tarfile.TarError, zipfile.BadZipFile, EOFError, KeyError, lzma.LZMAError, zlib.error)  # an archive's damage
 MEDIA = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".mp3", ".flac", ".ogg", ".wav", ".mp4", ".mkv", ".webm",
          ".avi", ".mov")
@@ -151,7 +161,8 @@ class Local:
                 f.write(b)
                 off += len(b)
                 done(off)
-        s.chattr(p, ch)
+        with contextlib.suppress(PermissionError):  # a disk that won't keep modes (FAT, exFAT) still gets the file,
+            s.chattr(p, ch)                          # as a host that won't does
 
     def run(s, script, d):
         return ["sh", "-c", script], d
@@ -204,13 +215,20 @@ class Remote:  # a host; its SFTP session opens on first use and reopens after a
         return Remote(s.h, s.tty, s.say)
 
 
-class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a folder; Python reads them all itself
+class Archive:  # a zip, a tar (gz, bz2, xz) or one compressed file, browsed read-only like a folder; all Python's own
     def __init__(s, path, name):
         s.name, s.files = name, {"/": {"perm": stat.S_IFDIR | 0o755, "size": 0}}  # every entry by its path inside
         entries = []  # (name inside, attrs); a link's target as "link"
         try:
-            if zipfile.is_zipfile(path):
+            if one := single(path):  # x.log.gz: x.log inside, its size known once read through (and checked)
+                s.z, s.open, st, size = one.open(path), lambda ref: one.open(path), os.stat(path), 0
+                while b := s.z.read(1 << 20):
+                    size += len(b)
+                entries.append((posixpath.splitext(posixpath.basename(path))[0],
+                                {"size": size, "ref": None, "perm": stat.S_IFREG | st.st_mode & 0o777, "mtime": int(st.st_mtime)}))
+            elif zipfile.is_zipfile(path):
                 s.z = zipfile.ZipFile(path)
+                s.open = s.z.open
                 for i in s.z.infolist():
                     a = {"size": i.file_size, "ref": i, "mtime": int(time.mktime((*i.date_time, 0, 0, -1))),
                          "perm": i.external_attr >> 16 or (stat.S_IFDIR if i.is_dir() else stat.S_IFREG) | 0o644}
@@ -219,6 +237,7 @@ class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a fold
                     entries.append((i.filename, a))
             else:
                 s.z = tarfile.open(path)
+                s.open = s.z.extractfile
                 for m in s.z.getmembers():
                     kind = stat.S_IFDIR if m.isdir() else stat.S_IFLNK if m.issym() else stat.S_IFREG if m.isfile() \
                         or m.islnk() else stat.S_IFIFO
@@ -273,7 +292,7 @@ class Archive:  # a zip or tar file (gz, bz2, xz), browsed read-only like a fold
     def read(s, p, off, size):
         ref = s.stat(p)["ref"]
         try:
-            with (s.z.open(ref) if isinstance(s.z, zipfile.ZipFile) else s.z.extractfile(ref)) as f:
+            with s.open(ref) as f:
                 f.seek(off)
                 while off < size:
                     b = f.read(min(CHUNK, size - off))
@@ -372,8 +391,7 @@ class Stream:  # chunks as a file to read from: what tarfile takes a member's co
 def pack(src, d, items, out, tick):  # items (names in folder d of src, trees whole) into a new archive at local path
     """out, its kind by its name (ARCHIVES), paths inside as the names given. Mode, times and links kept, as in a
     copy; pipes, sockets and devices go to tick.skipped, files in transit stay out. tick(path, at): bytes read."""
-    tar = next((m for e, m in TARS.items() if out.removesuffix(PART).lower().endswith(e)), None)
-    z = zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) if tar is None else tarfile.open(out, f"w:{tar}".rstrip(":"))
+    name = out.removesuffix(PART)  # (written as NAME.rshm-part)
 
     def content(p, size):  # the file's bytes, read with progress
         at = 0
@@ -381,6 +399,15 @@ def pack(src, d, items, out, tick):  # items (names in folder d of src, trees wh
             at += len(c)
             tick(p, at)
             yield c
+    if one := single(name):  # x.gz holds one file
+        if len(items) != 1 or not stat.S_ISREG(items[0][1].get("perm", 0)):
+            raise OSError(f"{posixpath.basename(name)}: holds one file; for more, name it .tar{name[name.rindex('.'):]}")
+        with one.open(out, "wb") as f:
+            for c in content(join(d, items[0][0]), items[0][1].get("size", 0)):
+                f.write(c)
+        return
+    tar = tarred(name)
+    z = zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) if tar is None else tarfile.open(out, f"w:{tar}".rstrip(":"))
     with z:
         for n, a in items:
             for rel, b in [(n, a), *((join(n, r), c) for r, c in walk(src, join(d, n)))] if isdir(a) else [(n, a)]:

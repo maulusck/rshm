@@ -400,7 +400,16 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
             raise AssertionError("still running")
         except SystemExit as e:
             assert (e.code or 0) == code, (k, e.code)
-    more(app, "^C", "n")  # ^C idle: asked, as q
+    sent, kill = [], os.kill
+    os.kill = lambda pid, sig: sent.append((pid, sig))
+    more(app, "\x1a")  # ^Z: the terminal handed back, rshm stopped (the shell's fg resumes it)
+    app.log.clear()
+    more(app, "r", ("poll", 26))  # and while something runs: it goes on after
+    os.kill = kill
+    assert sent == [(os.getpid(), ui.signal.SIGTSTP)] * 2 and "stopped" not in log(app), (sent, log(app))
+    more(app, "\x03", "n")  # ^C, a key (the terminal is raw): asked, as q
+    assert app.P.cwd == str(W)
+    more(app, "^C", "n")  # ^C idle, as a signal (kill -INT): asked, as q
     assert app.P.cwd == str(W)
     more(app, "\x1b", "/s.zip", "\n", "P", "\x15", *str(W / "un"), "\n")  # P on an archive: unpacked; its one top
     assert (W / "un" / "bin.dat").read_bytes() == (W / "sub" / "bin.dat").read_bytes()  # folder lands as itself, renamed
@@ -426,11 +435,27 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     assert (W / "x1").exists() and (W / "sub" / "x1").read_text() == "old" and log(app).endswith("; x1 kept at the source")
     more(app, "m", "\x15", str(W / "sub"), "\n", "y")
     assert not (W / "x1").exists() and (W / "sub" / "x1").read_text() == "new"
+    (W / "usb" / "in").mkdir(parents=True)  # onto another disk (a USB stick, FAT): no rename across, no modes kept
+    (W / "usb" / "in" / "f").write_text("f")
+    rename, chattr = fs.Local.rename, fs.Local.chattr
+    fs.Local.rename = lambda f, a, b, replace=True: rename(f, a, b, replace) if a.endswith(fs.PART) else \
+        (_ for _ in ()).throw(OSError(18, "Invalid cross-device link"))
+    fs.Local.chattr = lambda *a: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted"))
+    more(app, "\x1b", "r", "/usb", "\n", "m", "\x15", str(W / "sub"), "\n")
+    fs.Local.rename, fs.Local.chattr = rename, chattr
+    assert (W / "sub" / "usb" / "in" / "f").read_text() == "f" and not (W / "usb").exists(), log(app)[-300:]
     more(app, "\x1b", "@", "g", *"me@box:/srv", "\n")  # g on the host list: any destination, in the list from then on
     assert app.hosts["me@box:/srv"] == {"host": "me@box", "path": "/srv"} and app.P.mode == "hosts"
     assert app.P.cur()[1] == "me@box:/srv"
     more(app, "r", "g", "\n", "\x1b")
     assert "me@box:/srv" in app.hosts  # kept through a reload
+    more(app, "@", "/", *"zzz", "\n", "g", *"me@box:/srv", "\n")  # a host filter that hides it: lifted
+    assert app.P.cur()[1] == "me@box:/srv" and not app.P.hostv.flt
+    more(app, "\x1b", "\x1b")
+    (W / ("n" * 60)).touch()  # a menu titled with a long name, on a narrow screen: cut to fit, framed
+    more(app, "r", "/nnnnnnnnnn", "\n", ("size", 12, 23), K.F2, "\x1b", ("size", 30, 120), "\x1b")
+    assert not [e for e in ERRORS if e.endswith("12x23")], ERRORS
+    (W / ("n" * 60)).unlink()
     ui.connect = lambda *a, **k: None  # a host that's logged in but doesn't answer
     CFG.write_text('[hosts]\ng = ["nohost"]\n')
     more(app, "r", "@", "/nohost", "\n", "p", "\x1b", "\x1b", "/", ("err",), "x", "\n", "\x1b")
@@ -514,6 +539,12 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     assert log(app).endswith(": stopped") and not app.paused
     more(app, "r", ("poll", (y, x0, CLICK)), ("poll", 27))  # a tap where the box isn't (a short action): nothing
     assert log(app).endswith(": stopped") and not app.paused
+    app.log.clear()
+    more(app, "r", ("poll", 3))  # ^C, a key now: stops it, as Esc does
+    assert log(app).endswith(": stopped"), log(app)
+    app.log.clear()
+    more(app, "r", ("poll", 32), "\x03")  # and from a pause
+    assert log(app).endswith(": stopped") and not app.paused
     more(app, K.END, "r", ("poll", ord("k")), ("poll", 27))  # anything else typed meanwhile: done after, Esc behind it heard
     assert log(app).endswith(": stopped") and app.P.files.sel == len(app.P.files.rows) - 2
     more(app, "\x1b", "\x1b", "/sub", "\n", K.F8, "^C", "g", "^C")  # ^C at a question: no
@@ -551,7 +582,22 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
         more(app, "o", "P", "\n")  # packed into a host: built here, sent over
         with tarfile.open(W / "a.txt.tar.gz") as tf:
             assert tf.getnames() == ["a.txt"] and not left()
-        app.act(app.open_host, app.O, *was)
+        (W / "rmv").mkdir()  # a move within a host its rename refuses (another disk there): copies, then the source goes
+        (W / "rmv" / "f").write_text("f")
+        rename = sftp.SFTP.rename
+        sftp.SFTP.rename = lambda f, a, b, replace=True: rename(f, a, b, replace) if a.endswith(fs.PART) else \
+            (_ for _ in ()).throw(OSError("failed on the server (SFTP gives no reason: disk full, quota, read-only?)"))
+        more(app, "r", "/rmv", "\n", "m", "\x15", str(W / "moved"), "\n")
+        sftp.SFTP.rename = rename
+        assert (W / "moved" / "f").read_text() == "f" and not (W / "rmv").exists(), log(app)[-300:]
+        if was[0]:  # (the other pane back where it was, when it was in a folder)
+            app.act(app.open_host, app.O, *was)
+        with __import__("gzip").open(W / "log.gz", "wb") as g:  # a .gz there: P brings out what it holds
+            g.write(b"line\n" * 1000)
+        more(app, "\x1b", "r", "/log.gz", "\n", "P", "\n")
+        assert (Path(app.O.cwd) / "log").read_bytes() == b"line\n" * 1000 and not left(), log(app)[-300:]
+        (Path(app.O.cwd) / "log").unlink()
+        more(app, "\x1b", "/a.txt", "\n")
         CFG.write_text(f'[tools]\nview = "true"\nedit = "printf x >>"\n[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
         REAL.append("printf x >>")
         more(app, "r", "v", "e")  # your viewer gets a private copy; your editor's change goes back

@@ -110,8 +110,7 @@ class Buffer:  # the text being edited, with no screen: every change goes throug
 def edit(scr, data, title, C, save):  # save(bytes) stores it; an OSError from it is shown and editing goes on
     b, top, left, msg = Buffer(data), 0, 0, ""
     ask = lambda q: readline(scr, q, "", C["acc"] | curses.A_BOLD)
-    curses.raw()  # ^S ^Z ^C ^\\ are keys here, not terminal flow control or signals
-    try:
+    try:  # (the terminal is raw: ^S ^Z ^C ^\\ are keys, not flow control or signals)
         while True:
             cursor(1)
             H, W = scr.getmaxyx()
@@ -190,6 +189,4 @@ def edit(scr, data, title, C, save):  # save(bytes) stores it; an OSError from i
             elif isinstance(c, str) and (c.isprintable() or c == "\t"):
                 b.insert(c)
     finally:
-        curses.noraw()
-        curses.cbreak()
         cursor(0)

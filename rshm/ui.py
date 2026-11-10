@@ -57,7 +57,7 @@ STYLE = {"b": curses.A_BOLD, "d": curses.A_DIM}
 NAMES = {"Enter": (10, 13, curses.KEY_ENTER), "→": (curses.KEY_RIGHT,), "←": (curses.KEY_LEFT,), "Space": (32,),
          "Bksp": (curses.KEY_BACKSPACE, 127, 8), "Del": (curses.KEY_DC,), "Ins": (curses.KEY_IC,),
          "Tab": (9, curses.KEY_BTAB),
-         "Esc": (27,), **{f"^{c}": (ord(c) - 64,) for c in "CFLORU"}, **{f"F{i}": (curses.KEY_F0 + i,) for i in range(1, 11)}}
+         "Esc": (27,), **{f"^{c}": (ord(c) - 64,) for c in "CFLORUZ"}, **{f"F{i}": (curses.KEY_F0 + i,) for i in range(1, 11)}}
 MENUS = ("Pane 1", "File", "Mark", "Command", "Options", "Pane 2")
 KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under both pane menus; no menu: help only
     ("File", "Enter → l", "open", "open"), ("File", "← h Bksp", "parent directory", "parent"),
@@ -79,7 +79,8 @@ KEYS = [  # (menu, keys, what, method): the one table; "Pane" rows show under bo
     ("Command", "F2", "menu", "menu"), ("Command", "^O s", "shell", "shell"), ("Command", "p", "check host", "ping"),
     ("Options", "F9", "pulldown menus", "menubar"), ("Options", "t", "theme", "theme"),
     ("Options", "[ ]", "scroll log", "logscroll"), ("Options", "", "edit config (F4 on host list)", "editcfg"),
-    ("Options", "^L", "redraw", "draw"), ("Options", "F1 ?", "help", "help"), ("Options", "F10 q ^C", "quit", "quit"),
+    ("Options", "^L", "redraw", "draw"), ("Options", "^Z", "suspend", "suspend"), ("Options", "F1 ?", "help", "help"),
+    ("Options", "F10 q ^C", "quit", "quit"),
     (None, "↑ ↓ j k PgUp PgDn Home End", "move cursor", None), (None, "click, click again", "select, open", None),
     (None, "right-click", "menu (F2)", None), (None, "wheel", "scroll", None),
 ]
@@ -200,7 +201,8 @@ class App:
         if note:
             s.note(note)
         cursor(0)
-        curses.set_escdelay(25)
+        curses.raw()  # ^C ^Z ^S are keys: a signal can't land mid-read (ncurses then drops the next key); ^C asks to
+        curses.set_escdelay(25)  # quit, or stops what runs; ^Z suspends; children get the terminal as it was
         curses.mouseinterval(0)
         curses.mousemask(curses.ALL_MOUSE_EVENTS)
         s.colours = curses.has_colors() and not os.environ.get("NO_COLOR")  # no-color.org: set, not empty: none
@@ -330,9 +332,11 @@ class App:
             ks = [s.button(k) for k in iter(s.scr.getch, -1)]
         finally:
             s.scr.nodelay(False)
-        s.ahead += [k for k in ks if k not in (27, 32, curses.KEY_MOUSE, curses.KEY_RESIZE)]
-        if 27 in ks:
+        s.ahead += [k for k in ks if k not in (3, 26, 27, 32, curses.KEY_MOUSE, curses.KEY_RESIZE)]
+        if 27 in ks or 3 in ks:
             raise KeyboardInterrupt
+        if 26 in ks:  # ^Z: suspended where it stands, on from there after fg
+            s.suspend()
         if 32 in ks:
             s.pause()
 
@@ -340,13 +344,13 @@ class App:
         signal.setitimer(signal.ITIMER_REAL, 0)
         s.paused, t, k = True, time.monotonic(), None
         try:
-            while k not in (32, 27):
+            while k not in (32, 27, 3):
                 s.paint()
                 k = s.button(s.scr.getch())
         finally:
             s.paused, s.held = False, s.held + time.monotonic() - t
             signal.setitimer(signal.ITIMER_REAL, 0.12, 0.12)
-        if k == 27:
+        if k in (27, 3):
             raise KeyboardInterrupt
         s.paint()
         s.scr.refresh()
@@ -565,10 +569,11 @@ class App:
         if not m:  # kept through reloads, for this run
             s.extra[name] = s.hosts[name] = config.dest(name)
         s.pick(p, m[0][0] if m else (name,))
-        s.open_host(p, p.cur()[2])
+        s.open_host(p, m[0][1] if m else s.extra[name])
 
     def pick(s, p, path):  # select the host at path in p's list, unfolding the groups around it
         p.closed -= {path[:i] for i in range(1, len(path))}
+        p.hostv.flt = ""  # a filter that hides it: gone
         s.sync(p)
         p.hostv.sel = next(i for i, r in enumerate(p.hostv.rows) if r[3] == path)
 
@@ -646,8 +651,8 @@ class App:
                     continue
                 if c in ("\n", "\r", "\t", curses.KEY_ENTER):
                     break
-                if c == "\x1b":
-                    v.flt = ""
+                if c in ("\x1b", "\x03"):
+                    c, v.flt = "\x1b", ""
                 elif isinstance(c, int) and c in MOVES:
                     s.step(MOVES[c])
                     continue
@@ -880,16 +885,21 @@ class App:
         kept, ask = [], s.replacer()  # kept: moved entries not all of which went (declined, or pipes and devices)
 
         def body():
-            if move and same:  # one file system: a rename, nothing travels; only a folder merge needs copies
-                for n, a, t in list(pairs):
+            if move and same:  # one file system: a rename, nothing travels. A folder merge, or a rename refused (another
+                for n, a, t in list(pairs):  # disk mounted there: a USB stick), goes as copies, then the source goes
                     old = peek(dfs, t)
                     if old and isdir(old) and isdir(a):
                         continue
                     s.busy(s.doing, None, n)
-                    if not old or ask(t, a, old):
-                        src.rename(join(d, n), t)
-                    else:
+                    if old and not ask(t, a, old):
                         kept.append(n)
+                    else:
+                        try:
+                            src.rename(join(d, n), t)
+                        except ConnectionError:
+                            raise
+                        except OSError:  # EXDEV here; a host says only "failure"; the copy says what's really wrong
+                            continue
                     pairs.remove((n, a, t))
             if not pairs:
                 return s.declined(ask, kept)
@@ -1247,6 +1257,11 @@ class App:
                 s.focus = int(MENUS[i][-1]) - 1
             s.act(getattr(s, rows[r][3]))
 
+    def suspend(s):  # ^Z: back to the shell that started rshm; fg brings it back as it was (the clock stood still)
+        t = time.monotonic()
+        s.tty(os.kill, os.getpid(), signal.SIGTSTP)
+        s.held += time.monotonic() - t
+
     def quit(s):  # asked once; the key again (q q, F10 F10, ^C ^C) says yes, ^C the way ^C ends a program
         k = s.keypress("quit? (y/N)")
         if k in (ord("y"), ord("Y"), ord("q"), curses.KEY_F10, 3):
@@ -1284,6 +1299,7 @@ class App:
         s.scr.noutrefresh()  # -> (win, y, x, w, h, off)
         H, W = s.scr.getmaxyx()
         w = min(max(max(cells(l) + cells(k or "") for l, k in items) + 6, cells(title) + 6), W)
+        title = fit(title, max(w - 6, 0)).rstrip() if title else ""  # a long name, a narrow screen: cut, framed
         h = min(len(items) + 2, H)
         y, x = max(0, min(y0, H - h)), max(0, min(x0, W - w))
         win = window(curses.newwin(h, w, y, x))

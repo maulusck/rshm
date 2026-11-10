@@ -263,6 +263,7 @@ for name, mk in (("up", lambda: (Lo, remote())), ("down", lambda: (remote(), Lo)
     a.close(), b.close()
     wipe(d / "out")
     for run in range(12):
+        FAULT["at"] = set()  # the last run's plan off before the sessions open: the faults land in the copy alone
         a, b = mk()
         FAULT["n"], FAULT["do"] = 0, "drop"
         FAULT["at"] = set(rnd.sample(range(2, clean), min(rnd.randrange(1, 5), clean - 2)))

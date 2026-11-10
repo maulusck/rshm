@@ -50,7 +50,7 @@ def view(scr, data, title, C):  # C: the theme's colours by role
             count += chr(c)
             continue
         n_, count = int(count) if count else None, ""
-        if c in (ord("q"), 27, curses.KEY_F3, curses.KEY_F10):
+        if c in (ord("q"), 27, 3, curses.KEY_F3, curses.KEY_F10):
             return
         if c in (ord("g"), ord("G")) and n_ is not None:  # N g: line N (byte row N in hex)
             top = next((i for i in range(n) if line(i) >= n_ - 1), n)

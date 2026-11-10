@@ -49,7 +49,8 @@ SIZES = [(1, 1), (2, 10), (3, 3), (6, 19), (7, 20), (8, 24), (24, 80), (12, 40),
 
 
 class Term:  # one rshm in a pseudo terminal, its screen kept by pyte
-    def __init__(t, args, cwd, rows=30, cols=120, env=()):  # env: what this terminal is (TERM, LANG, NO_COLOR)
+    def __init__(t, args, cwd, rows=30, cols=120, env=(), cmd=None):  # env: what this terminal is (TERM, LANG,
+        # NO_COLOR); cmd: what runs on it instead of rshm (a shell)
         t.screen, t.raw = Screen(cols, rows), []
         t.stream = Stream(t.screen)
         t.pid, t.fd = pty.fork()
@@ -61,7 +62,8 @@ class Term:  # one rshm in a pseudo terminal, its screen kept by pyte
                 os.environ.pop(k, None)
             os.environ.update(env)
             run = os.environ.get("RSHM_RUN", sys.executable).split()  # RSHM_RUN: a python to run it with (a tracer)
-            os.execvp(run[0], [*run, str(T / "rshm.pyz"), *args])  # finds rshm.toml beside it
+            cmd = cmd or [*run, str(T / "rshm.pyz"), *args]  # finds rshm.toml beside it
+            os.execvp(cmd[0], cmd)
 
     def text(t):
         return "\n".join(t.screen.display)
@@ -360,6 +362,34 @@ try:
         t.sweep(lambda s: "copy to other pane" in s, "help")
         t.keys("Esc")
         assert t.quit() == 0
+
+    t = Term([], B)  # ^C: asks, as q does; a key, never a signal that could eat the next one. ^C again: ended as ^C ends
+    t.until(lambda s: "10quit" in s, "started")
+    t.keys("\x03")
+    t.until(lambda s: "quit? (y/N)" in s, "^C asks")
+    t.keys("n", "\x03")
+    t.until(lambda s: "quit? (y/N)" in s, "^C asks again")
+    os.write(t.fd, b"\x03")
+    with contextlib.suppress(OSError):
+        while os.read(t.fd, 65536):
+            pass
+    assert os.waitstatus_to_exitcode(os.waitpid(t.pid, 0)[1]) == 130
+
+    sh = Term([], B, env={"PS1": "$ "}, cmd=["bash", "--norc", "--noprofile", "-i"])  # ^Z from a shell with job
+    run = " ".join(os.environ.get("RSHM_RUN", sys.executable).split() + [str(T / "rshm.pyz")])
+    sh.keys(f"{run}\r")  # control: stopped, the shell back; fg: rshm as it was
+    sh.until(lambda s: "10quit" in s and "note.txt" in s, "rshm from a shell")
+    sh.keys("\x1a")
+    sh.until(lambda s: "Stopped" in s, "^Z: stopped, the shell back")
+    sh.keys("fg\r")
+    sh.until(lambda s: "10quit" in s and "Stopped" not in s.split("\n")[-3:], "fg: back")
+    sh.keys("\x0c", "\x03", "\x03", "echo rc=$?\r")
+    sh.until(lambda s: "rc=130" in s, "^C ^C after a suspend: ended as ^C ends")
+    os.write(sh.fd, b"exit\r")
+    with contextlib.suppress(OSError):  # (read to its end: the terminal closes with the shell)
+        while os.read(sh.fd, 65536):
+            pass
+    assert os.waitpid(sh.pid, 0)[1] == 0
 
     # --- terminals: each draws what it can, nothing it can't ---
     t = Term([], B, env={"TERM": "vt100", "LANG": "C"})  # no UTF-8, no colours, can't hide its cursor

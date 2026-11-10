@@ -21,10 +21,11 @@ like a shell line, `Tab` completes paths here or on a host (`Shift+Tab` back). M
 
 ## How it behaves
 
-- **Copy, move**: between any two panes, as `cp -pP` (mode, times, links kept). Each file lands as `NAME.rshm-part`,
-  renamed when whole; a dropped link reconnects and resumes. Replacing asks, file by file: `y` `n`, `a` all, `s` none,
+- **Copy, move**: from any pane to any pane, here or on a host, as `cp -pP` (mode, times, links kept). A move is a
+  rename where it can be, else a copy, then the source goes (another disk, a USB stick). Each file lands as
+  `NAME.rshm-part`, renamed when whole; a dropped link reconnects and resumes. Replacing asks, file by file: `y` `n`, `a` all, `s` none,
   `u` where newer.
-- **Archives** (zip, jar, tar, tar.gz, tar.bz2, tar.xz): `Enter` browses one, `F5` copies out of it. `P` packs the
+- **Archives** (zip, jar, tar, tar.gz, tar.bz2, tar.xz, and one file as .gz .bz2 .xz): `Enter` browses one, `F5` copies out of it. `P` packs the
   marked entries into the other pane, the kind by the name you give; on an archive, `P` unpacks it there (one entry
   at its top lands as itself, more go into a folder named after it). Corruption is reported, never passed on.
 - **Links**: a link to a directory opens under its own name; `..` goes back where you came from, as `cd` does.
@@ -33,7 +34,8 @@ like a shell line, `Tab` completes paths here or on a host (`Shift+Tab` back). M
   `ProxyCommand`), once. Everything about reaching a host is `~/.ssh/config`'s.
 - **View, edit**: `[open]` match first, then your tools on a private local copy (sent back only if changed), else the
   built-in viewer (less keys) and editor (nano keys).
-- **Quit**: `q`, `F10` or `^C` ask; the same key again quits.
+- **Quit**: `q`, `F10` or `^C` ask; the same key again quits. `^Z` suspends (`fg` resumes). While something runs, `^C`
+  stops it, as `Esc` does.
 
 ## Config
 
