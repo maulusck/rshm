@@ -9,9 +9,13 @@ CLICK, RIGHT = curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED, curses.BUTTON3_P
 
 
 def utf8():  # does the terminal take UTF-8? Its locale says, read as tmux reads it: the first of LC_ALL, LC_CTYPE,
-    for k in ("LC_ALL", "LC_CTYPE", "LANG"):  # LANG that's set. Python puts C.UTF-8 in LC_CTYPE over a C locale (its
-        v = os.environ.get(k, "")             # UTF-8 mode on): that one is Python's, not the terminal's
-        if v and not (k == "LC_CTYPE" and v == "C.UTF-8" and sys.flags.utf8_mode):
+    env, ours = os.environ, sys.flags.utf8_mode  # LANG that's set. Over a C locale Python puts C.UTF-8 in LC_CTYPE: that
+    with contextlib.suppress(OSError):  # one is Python's, not the terminal's. Linux keeps the environment as it started
+        env, ours = dict(x.split("=", 1) for x in open("/proc/self/environ", "rb").read().decode(errors="replace")
+                         .split("\0") if "=" in x), False
+    for k in ("LC_ALL", "LC_CTYPE", "LANG"):  # ponytail: elsewhere UTF-8 mode marks it, and from Python 3.15 (UTF-8
+        v = env.get(k, "")                    # mode always on) a C.UTF-8 of your own there reads as Python's: ASCII
+        if v and not (k == "LC_CTYPE" and v == "C.UTF-8" and ours):
             return "UTF-8" in v.upper().replace("UTF8", "UTF-8")
     return False
 
@@ -123,6 +127,12 @@ def bar(left, right, W, keep="end"):  # a status line W-1 cells wide: right kept
     return fit(left, max(W - 1 - cells(right), 0), keep) + right
 
 
+def key(scr):  # a key, waited for: a read a signal cut short is no key
+    while True:
+        with contextlib.suppress(curses.error):
+            return scr.get_wch()
+
+
 def line(scr, q, text="", attr=0, back=None, ends=(), complete=None):  # the one-line editor on the bottom row
     i, fresh, cyc, k = len(text), bool(text), None, 0  # -> (text, the key that ended it: ⏎, Esc (^C too), or one of
     cursor(1)  # ends); back() repaints behind it. ← → Home End Del ^A ^E ^K ^U ^W edit. A prefilled answer
@@ -140,7 +150,7 @@ def line(scr, q, text="", attr=0, back=None, ends=(), complete=None):  # the one
                 if cyc and col + 8 < W:  # going round the matches: which one of how many
                     scr.addstr(H - 1, W - 2 - len(f"{k + 1}/{len(cyc)}"), f"{k + 1}/{len(cyc)}", attr | curses.A_REVERSE)
                 scr.move(H - 1, max(0, min(col - start, W - 2)))
-            c = scr.get_wch()
+            c = key(scr)
             if c in ("\n", "\r", curses.KEY_ENTER) or c in ends:
                 return text, "\n" if c in ("\r", curses.KEY_ENTER) else c
             if c in ("\x1b", "\x03"):

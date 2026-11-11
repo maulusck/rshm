@@ -1,0 +1,39 @@
+# Every push: the four test suites on every Python rshm runs on. A tag named as the version (3.9.0 or v3.9.0), once
+# they pass: rshm.pyz and its packages, as a release.
+name: release
+on: push
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
+        os: [ubuntu-latest]
+        include:  # 3.9 isn't built for the newest image; the older one keeps the older ncurses under test too
+          - {python: "3.9", os: ubuntu-24.04}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get install -y openssh-server && sudo mkdir -p /run/sshd && pip install pyte
+      # as root, as the suites are written (they chown, and read what only root may)
+      - run: for t in test_rshm test_stress test_app test_live; do sudo env "PATH=$PATH" python $t.py || exit 1; done
+  release:
+    if: github.ref_type == 'tag'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export VERSION=$(python3 -m rshm -V | cut -d' ' -f2)  # rshm/__init__.py: the one place the version is said
+          [ "${GITHUB_REF_NAME#v}" = "$VERSION" ] || { echo "tag $GITHUB_REF_NAME is not version $VERSION"; exit 1; }
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0
+          python3 -m rshm --pyz dist/rshm.pyz
+          for p in deb rpm apk archlinux; do ~/go/bin/nfpm pkg -p $p -t dist/; done
+          gh release create "$GITHUB_REF_NAME" dist/* --title "rshm $VERSION" --generate-notes

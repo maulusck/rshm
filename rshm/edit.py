@@ -2,7 +2,7 @@
 line, ^Z undo. Tabs, wide characters, CRLF and bytes it can't decode come back exactly as they were."""
 import curses, re
 
-from .screen import CLICK, WHEEL_DOWN, WHEEL_UP, bar, cell, cells, cursor, readline, safe, span
+from .screen import CLICK, WHEEL_DOWN, WHEEL_UP, bar, cell, cells, cursor, key, readline, safe, span
 
 TAB = 8
 
@@ -125,7 +125,7 @@ def edit(scr, data, title, C, save):  # save(bytes) stores it; an OSError from i
             scr.addstr(H - 1, 0, bar(f" {msg or title}", keys, W), C["err" if msg[:1] == "✗" else "acc"] | curses.A_BOLD)
             scr.move(b.y - top, col - left)
             msg = ""
-            c = scr.get_wch()
+            c = key(scr)
             if c == "\x13":  # ^S
                 try:
                     save(b.data())
@@ -136,7 +136,7 @@ def edit(scr, data, title, C, save):  # save(bytes) stores it; an OSError from i
                 if not b.changed:
                     return
                 scr.addstr(H - 1, 0, bar(" save changes? y yes  n no  else keep editing", "", W), C["acc"] | curses.A_BOLD)
-                k = scr.get_wch()
+                k = key(scr)
                 if k in ("n", "N"):
                     return
                 if k in ("y", "Y"):

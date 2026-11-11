@@ -7,12 +7,16 @@ Python 3.9+ and OpenSSH, nothing else; a config is optional. Viewer, editor and 
 python3 rshm.pyz              # this host, and the host list
 python3 rshm.pyz web          # a host from the list in pane 2: name, group/name or a unique part of it
 python3 rshm.pyz web db       # one host per pane
-python3 rshm.pyz me@box:/srv  # any ssh destination: [user@]host[:path], ssh://user@host:port
+python3 rshm.pyz web:/srv     # ...in that directory; any ssh destination too: me@box, ssh://me@box:2222
+python3 rshm.pyz /srv ~/x     # a directory alone is this machine's
 python3 -m rshm --pyz FILE    # rshm as one executable file
 ```
 
-Hosts: rshm's `[hosts]` and every `~/.ssh/config` alias, or any destination (`g` on the host list). Servers: any
-SFTP server, SFTP-only and chrooted accounts too. Linux, macOS, BSD, Termux.
+Hosts: rshm's `[hosts]` and every `~/.ssh/config` alias, or any ssh destination. `g` on the host list takes the same
+places as the command line. Servers: any SFTP server, SFTP-only and chrooted accounts too. Linux, macOS, BSD, Termux.
+
+Install: `rshm.pyz` anywhere on your `PATH`, or the deb, rpm, apk or Arch package of a
+[release](https://github.com/maulusck/rshm/releases) (`/usr/bin/rshm`; needs python3 and the ssh client).
 
 ## Keys
 
@@ -80,4 +84,6 @@ no colour, no UTF-8 or an unknown `TERM` get what they can show.
 
 `python3 test_rshm.py` (logic, against a real `sftp-server`), `test_stress.py` (random trees, drops, full disks,
 fuzzing), `test_app.py` (the app on a strict virtual terminal, then a monkey), `test_live.py` (the built `rshm.pyz` on a
-real terminal and a throwaway sshd; needs `pyte`, `sshd`).
+real terminal and a throwaway sshd; needs `pyte`, `sshd`). As root (they chown). Every push runs them on Python 3.9
+to 3.15; a tag named as the version then releases `rshm.pyz` and the packages (`nfpm.yaml`,
+`.github/workflows/release.yml`). The version is said once, in `rshm/__init__.py`.

@@ -375,6 +375,31 @@ try:
             pass
     assert os.waitstatus_to_exitcode(os.waitpid(t.pid, 0)[1]) == 130
 
+    t = Term([str(D), "."], B)  # places: a directory alone is this machine's, one per pane
+    t.until(lambda s: f"1  local:{D}" in s and f"2  local:{B}" in s, "two directories here, one per pane")
+    os.kill(t.pid, signal.SIGINT)  # ^C come as a signal (a terminal that kept its signals): the same key, wherever it
+    t.until(lambda s: "quit? (y/N)" in s, "SIGINT asks")  # lands: the question waits, a prompt is cancelled, the
+    t.pump(0.5)                                             # editor keeps what it holds
+    assert "quit? (y/N)" in t.text(), "the question went away by itself"
+    t.keys("n", "g")
+    t.until(lambda s: "go to:" in s, "a prompt")
+    os.kill(t.pid, signal.SIGINT)
+    t.until(lambda s: "go to:" not in s and "10quit" in s, "SIGINT cancels a prompt")
+    t.keys("/note", "\r", "F4", "Z")
+    t.until(lambda s: s.startswith("Z") and "^S save" in s, "in the editor")
+    os.kill(t.pid, signal.SIGINT)
+    t.pump(0.5)
+    assert t.text().startswith("Z") and "^S save" in t.text() and os.waitpid(t.pid, os.WNOHANG) == (0, 0)
+    t.keys("^X", "n")
+    t.until(lambda s: "10quit" in s, "out of the editor, unsaved")
+    os.kill(t.pid, signal.SIGINT)
+    t.until(lambda s: "quit? (y/N)" in s, "SIGINT asks again")
+    os.kill(t.pid, signal.SIGINT)
+    with contextlib.suppress(OSError):
+        while os.read(t.fd, 65536):
+            pass
+    assert os.waitstatus_to_exitcode(os.waitpid(t.pid, 0)[1]) == 130
+
     sh = Term([], B, env={"PS1": "$ "}, cmd=["bash", "--norc", "--noprofile", "-i"])  # ^Z from a shell with job
     run = " ".join(os.environ.get("RSHM_RUN", sys.executable).split() + [str(T / "rshm.pyz")])
     sh.keys(f"{run}\r")  # control: stopped, the shell back; fg: rshm as it was

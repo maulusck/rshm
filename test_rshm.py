@@ -54,8 +54,20 @@ paths = lambda q: ["/".join(p) for p, _ in config.find(h, q)]
 assert paths("web") == ["prod/web"] and paths("lab/pi") == ["lab/pi"] and paths("DB") == ["prod/db"]
 assert paths("lab") == ["lab/pi", "lab/box"] and paths("nope") == [] and paths("we") == ["prod/web"]
 assert paths("me@we") == paths("web:/x") == []  # a destination: never a part of a name
-assert config.dest("me@box:/srv") == {"host": "me@box", "path": "/srv"} and config.dest("box") == {"host": "box"}
-assert config.dest("ssh://me@box:2222") == {"host": "ssh://me@box:2222"} and config.dest("box:") == {"host": "box"}
+assert config.dest("me@box:/srv") == ("me@box", "/srv") and config.dest("box") == config.dest("box:") == ("box", "")
+assert config.dest("ssh://me@box:2222") == ("ssh://me@box:2222", "")  # a path alone: this machine, no host
+assert [config.dest(x) for x in ("/srv", "~/x", "./x", "..")] == [("", "/srv"), ("", "~/x"), ("", "./x"), ("", "..")]
+tg = lambda name, hs=h: (lambda hit, host, path: (hit and "/".join(hit[0]), host, path))(*config.target(hs, name))
+assert tg("web:/srv") == ("prod/web", "web", "/srv") and tg("we") == ("prod/web", "we", "")  # a host of the list, a path
+assert tg("me@box:/x") == (None, "me@box", "/x") and tg("/srv") == (None, "", "/srv")  # an ssh destination; this machine
+lh2 = config.tree({"localdev": "a", "g": {"local": "b"}})  # local: this machine, unless a host of yours is called that
+assert tg("local:/x") == (None, "local", "/x") and tg("local:/x", lh2) == ("g/local", "local", "/x")
+assert tg("local", config.tree({"localdev": "a", "localtest": "b"}))[0] is None
+try:
+    config.target(h, "lab")
+    raise AssertionError("two hosts taken as one")
+except OSError as e:
+    assert str(e) == "ambiguous host 'lab': lab/pi, lab/box"
 
 # ssh argv: the ssh config does user/key/jump; rshm adds only its master and timeouts, once (ssh keeps the first)
 a = ssh.argv(H["web"], batch=True, timeout=3)
@@ -203,6 +215,15 @@ for env, utf in (({"LANG": "en_US.UTF-8"}, True), ({"LC_ALL": "C.utf8"}, True), 
     got = subprocess.run([sys.executable, "-c", "from rshm import screen; print(screen.ASCII)"], capture_output=True,
                          text=True, cwd=Path(__file__).parent, env={"PATH": os.environ["PATH"], **env}).stdout.strip()
     assert got == str(not utf), (env, got)
+was = dict(os.environ)  # no /proc (macOS, BSD): the environment as it is now, Python's C.UTF-8 told by UTF-8 mode
+screen.open = lambda *a, **k: (_ for _ in ()).throw(OSError("no /proc"))
+for env, utf in (({"LANG": "en_US.UTF-8"}, True), ({"LANG": "C"}, False), ({"LC_CTYPE": "C.UTF-8"}, not sys.flags.utf8_mode)):
+    os.environ.clear()
+    os.environ.update(env)
+    assert screen.utf8() == utf, env
+os.environ.clear()
+os.environ.update(was)
+del screen.open
 screen.ASCII = True  # then each character drawn is one ASCII one, and measured as one: nothing shifts
 glyphs = "─│┌┐└┘├┤┬┴✓✗…→←↑↓·×●○▸▾▲▼⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 assert screen.plain(glyphs) == "-|++++++++" "+!~" "><^v" "-x*o>v^v" "|/-\\|/-\\|/" and screen.plain("日本 e\u0301") == "?? e?"
@@ -451,7 +472,9 @@ if srv:
         assert fs.complete(f, str(D), "t") == ["t/", "tdir/"] and fs.complete(f, str(D), "t/su") == ["t/sub/"]
         assert fs.complete(f, "/", str(D / "t") + "/sub/") == [str(D / "t" / "sub" / "x.txt")]
         assert fs.complete(f, str(D), "nope/x") == [] and fs.complete(f, str(D), "t/sub/x.txt/") == []
-    assert fs.complete(Lo, "/", "~/") == fs.complete(Lo, "/", str(Path.home()) + "/") and fs.complete(R, "/", "~/x") == []
+    home = str(Path.home()) + "/"  # ~/ completes as the home it is, under the name typed
+    assert [x[2:] for x in fs.complete(Lo, "/", "~/")] == [x[len(home):] for x in fs.complete(Lo, "/", home)]
+    assert fs.complete(R, "/", "~/x") == []
     tk = lambda *a: None  # pack from a host: the same archive as from here
     tk.skipped = []
     fs.pack(R, str(D), [("t", R.stat(str(D / "t"), False))], str(d / "r.tar.xz"), tk)
@@ -772,7 +795,7 @@ def run(*args, wrapper=None):  # rshm ARGS in this process -> (exit code, stderr
 
 cfg = d / "c.toml"
 cfg.write_text('[hosts]\nweb = "w"\nweb2 = "w2"\n')
-assert "no such file" in run("-c", str(d / "none.toml"))[1] and "at most two hosts" in run("a", "b", "c")[1]
+assert "no such file" in run("-c", str(d / "none.toml"))[1] and "at most two places" in run("a", "b", "c")[1]
 if tomllib:
     assert "ambiguous host 'we': web, web2" in run("-c", str(cfg), "we")[1] and run("-c", str(cfg), "zz")[0] == 0  # in no list: a destination
     assert run("-c", str(cfg), "web")[0] == 0 and run("-c", str(cfg), "web", "web2")[0] == 0

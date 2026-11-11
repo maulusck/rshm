@@ -1,0 +1,16 @@
+# rshm as a system package: the one file `rshm --pyz` writes, as /usr/bin/rshm. Built by .github/workflows/release.yml:
+#   python3 -m rshm --pyz dist/rshm.pyz && VERSION=$(python3 -m rshm -V | cut -d' ' -f2) nfpm pkg -p deb -t dist/
+name: rshm
+arch: all
+version: ${VERSION}
+maintainer: maulusck
+description: Two-pane file manager for this machine and any ssh host, over sftp
+homepage: https://github.com/maulusck/rshm
+contents:
+  - src: dist/rshm.pyz
+    dst: /usr/bin/rshm
+    file_info: {mode: 0755}
+depends: [python3, openssh-client]  # deb, apk
+overrides:
+  rpm: {depends: [python3, openssh-clients]}
+  archlinux: {depends: [python, openssh]}

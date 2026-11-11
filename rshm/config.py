@@ -167,6 +167,18 @@ def find(hosts, name):  # -> [(path, host)]: exact name or group/name, else subs
     return exact or [x for x in hs if name.lower() in "/".join(x[0]).lower()] * (not re.search("[@:]", name))
 
 
-def dest(name):  # a host in no list, as typed, scp's way: [user@]host[:path], or ssh://[user@]host[:port]; the rest
-    host, _, path = (name, "", "") if name.startswith("ssh://") else name.partition(":")  # is ssh's (keys, jumps)
-    return {"host": host, **({"path": path} if path else {})}  # ponytail: IPv6 as ssh://[::1] only, no [::1]:path
+def dest(name):  # a place as typed, scp's way -> (host, path): [user@]host[:path], ssh://[user@]host[:port]; a path
+    if name[:1] in ("/", "~", "."):  # alone (/srv, ~/x, ./x) is on this machine: no host
+        return "", name
+    host, _, path = (name, "", "") if name.startswith("ssh://") else name.partition(":")
+    return host, path  # ponytail: IPv6 as ssh://[::1] only, no [::1]:path
+
+
+def target(hosts, name):  # where NAME leads (`rshm NAME`, g on the host list) -> (its (place in the list, entry) or None,
+    host, path = dest(name)  # the host as typed, the path): a host of the list by name, group/name or a unique part
+    m = find(hosts, host) if host else []
+    if host == "local" and not any(at[-1] == "local" for at, _ in m):
+        m = []  # this machine, unless a host of yours is called local
+    if len(m) > 1:
+        raise OSError(f"ambiguous host {host!r}: {', '.join('/'.join(at) for at, _ in m)}")
+    return (m[0] if m else None), host, path

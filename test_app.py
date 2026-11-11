@@ -445,12 +445,15 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     fs.Local.rename, fs.Local.chattr = rename, chattr
     assert (W / "sub" / "usb" / "in" / "f").read_text() == "f" and not (W / "usb").exists(), log(app)[-300:]
     more(app, "\x1b", "@", "g", *"me@box:/srv", "\n")  # g on the host list: any destination, in the list from then on
-    assert app.hosts["me@box:/srv"] == {"host": "me@box", "path": "/srv"} and app.P.mode == "hosts"
-    assert app.P.cur()[1] == "me@box:/srv"
+    assert app.hosts["me@box"] == {"host": "me@box"} and app.P.mode == "hosts" and app.P.cur()[1] == "me@box"
     more(app, "r", "g", "\n", "\x1b")
-    assert "me@box:/srv" in app.hosts  # kept through a reload
+    assert "me@box" in app.hosts  # kept through a reload
     more(app, "@", "/", *"zzz", "\n", "g", *"me@box:/srv", "\n")  # a host filter that hides it: lifted
-    assert app.P.cur()[1] == "me@box:/srv" and not app.P.hostv.flt
+    assert app.P.cur()[1] == "me@box" and not app.P.hostv.flt
+    for typed, where in ((str(W / "sub"), W / "sub"), (f"local:{W}", W), ("~", BOX), ("local", BOX)):
+        more(app, "\x1b", "@", "g", *typed, "\n")  # a directory alone, or local: this machine; local alone: where it was
+        assert app.P.mode == "files" and app.P.host is ui.LOCAL and app.P.cwd == str(where), (typed, app.P.cwd)
+    more(app, "@", "g", *f"local:{W}", "\n")
     more(app, "\x1b", "\x1b")
     (W / ("n" * 60)).touch()  # a menu titled with a long name, on a narrow screen: cut to fit, framed
     more(app, "r", "/nnnnnnnnnn", "\n", ("size", 12, 23), K.F2, "\x1b", ("size", 30, 120), "\x1b")

@@ -4,7 +4,7 @@ import atexit, contextlib, curses, fnmatch, grp, math, os, posixpath, pwd, rando
 import subprocess, sys, tempfile, time
 from collections import deque
 
-from . import config, edit as editor, view as viewer
+from . import __version__, config, edit as editor, view as viewer
 from .fs import (ARCHIVES, PART, Archive, Local, Remote, complete, copy, folder, isdir, islink, join, kind, look, marker,
                  names, pack, peek, rm, save, special, walk)
 from .screen import (CLICK, MOVES, RIGHT, WHEEL_DOWN, WHEEL_UP, bar, cells, cursor, dur, fit, human, line, many, plain,
@@ -203,7 +203,8 @@ class App:
         cursor(0)
         curses.raw()  # ^C ^Z ^S are keys: a signal can't land mid-read (ncurses then drops the next key); ^C asks to
         curses.set_escdelay(25)  # quit, or stops what runs; ^Z suspends; children get the terminal as it was
-        curses.mouseinterval(0)
+        curses.mouseinterval(1)  # a press and release that come together (tmux, a slow link) as one click, no wait; 0
+        # splits them, and ncurses 6.6 then loses the taps after it
         curses.mousemask(curses.ALL_MOUSE_EVENTS)
         s.colours = curses.has_colors() and not os.environ.get("NO_COLOR")  # no-color.org: set, not empty: none
         s.defaults = False  # the terminal's own colours (-1), asked for always, or ncurses paints white on black
@@ -215,6 +216,7 @@ class App:
         s.lucky = random.choice([n for n in THEMES if s.can(n)] or ["default"])  # "random": this run's pick
         s.keymap = {c: getattr(s, m) for _, keys, _, m in KEYS if m for c in codes(keys)}
         signal.signal(signal.SIGALRM, s.spin)
+        signal.signal(signal.SIGINT, s.sigint)
         atexit.register(s.cleanup)
         s.load()
         LOCAL["_cwd"] = lcwd()
@@ -562,14 +564,17 @@ class App:
         elif p.fs:
             p.mode = "files"
 
-    def reach(s, p, name):  # pane p on the host called name (as `rshm NAME` takes it): one in the list, else a destination
-        m = config.find(s.hosts, name)
-        if len(m) > 1:
-            raise OSError(f"ambiguous host {name!r}: {', '.join('/'.join(x) for x, _ in m)}")
-        if not m:  # kept through reloads, for this run
-            s.extra[name] = s.hosts[name] = config.dest(name)
-        s.pick(p, m[0][0] if m else (name,))
-        s.open_host(p, m[0][1] if m else s.extra[name])
+    def reach(s, p, name):  # pane p where name leads (`rshm NAME`, g on the host list): a path on this machine, or
+        hit, host, path = config.target(s.hosts, name)  # host[:path]: a host of the list, else an ssh destination
+        if hit:
+            at, h = hit
+        elif host in ("", "local"):
+            at, h = ("local",), LOCAL
+        else:  # in the list from now on, through reloads, for this run
+            at, h = (host,), s.extra.setdefault(host, {"host": host})
+            s.hosts[host] = h
+        s.pick(p, at)
+        s.open_host(p, h, path or None)
 
     def pick(s, p, path):  # select the host at path in p's list, unfolding the groups around it
         p.closed -= {path[:i] for i in range(1, len(path))}
@@ -594,9 +599,9 @@ class App:
     def path(s, p, x):  # a typed path: as is from / or ~, else from the pane's folder
         return x if x[:1] in ("/", "~") else join(p.cwd, x)
 
-    def goto(s):  # on the host list: a host by name, or any ssh destination (me@box, box:/srv)
+    def goto(s):  # on the host list: a host[:directory] (of the list, or any ssh destination), or a directory here
         if s.P.mode == "hosts":
-            name = s.ask("connect to:")
+            name = s.ask("go to host[:directory], or /directory here:")
             return name and s.reach(s.P, name)
         p = s.folder()
         d = s.ask("go to:", p.cwd, p.fs, p.cwd)
@@ -1234,7 +1239,7 @@ class App:
 
     def help(s, y=None, x=None):  # every key, by menu; ⏎ runs the chosen one
         rows = [r for g, rs in grouped() for r in [(None, None, g, None), *rs]]
-        i = s.choose([(w, k) for _, k, w, _ in rows], y, x, title="keys")
+        i = s.choose([(w, k) for _, k, w, _ in rows], y, x, title=f"rshm {__version__}: keys")
         if isinstance(i, int) and rows[i][3]:
             s.act(getattr(s, rows[i][3]))
 
@@ -1273,12 +1278,16 @@ class App:
             return (readline(s.scr, q, text, s.C["acc"] | curses.A_BOLD, s.paint,
                              fs and (lambda t: complete(fs, base, t))) or "").strip()
 
+    def sigint(s, *_):  # ^C come as a signal (a terminal that kept its signals, kill -INT): the key ^C, read next,
+        with contextlib.suppress(curses.error):  # like one typed. Never an exception in the middle of a read
+            curses.ungetch(3)
+
     def keypress(s, q):  # a question on the bottom line -> the key that answers it (^C: 3); the clock stands still
         s.typing, t = q, time.monotonic()
         try:
             with s.still():
                 s.paint()
-                while (k := s.scr.getch()) == curses.KEY_RESIZE:  # a new size is no answer
+                while (k := s.scr.getch()) in (curses.KEY_RESIZE, -1):  # a new size, a read cut short: no answer
                     s.paint()
                 return k
         except KeyboardInterrupt:
@@ -1341,7 +1350,7 @@ class App:
         while True:
             win, y, x, w, h, off = s.popup(items, i, y0, x0, title)
             c = win.getch()
-            if c == curses.KEY_RESIZE:
+            if c in (curses.KEY_RESIZE, -1):
                 continue
             if c in MOVES:
                 i = max(0, min(len(items) - 1, i + MOVES[c])) if abs(MOVES[c]) > 1 else (i + MOVES[c]) % len(items)
