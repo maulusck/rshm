@@ -35,7 +35,9 @@ like a shell line, `Tab` completes paths here or on a host (`Shift+Tab` back). M
 - **Links**: a link to a directory opens under its own name; `..` goes back where you came from, as `cd` does.
 - **Long operations** show after half a second: progress, speed, time left. `Space` pauses, `Esc` stops.
 - **Logins**: one per host, shared by both panes and all transfers. ssh asks on the terminal (keys, agent, passwords,
-  `ProxyCommand`), once. Everything about reaching a host is `~/.ssh/config`'s.
+  `ProxyCommand`), once, and what it says there (a banner, a `ProxyCommand`'s progress) shows as it comes; a banner's
+  first line stays in the log. A server slow to start SFTP (a startup file waiting for input) is named while you wait;
+  `Esc` stops it. Everything about reaching a host is `~/.ssh/config`'s.
 - **View, edit**: `[open]` match first, then your tools on a private local copy (sent back only if changed), else the
   built-in viewer (less keys) and editor (nano keys).
 - **Quit**: `q`, `F10` or `^C` ask; the same key again quits. `^Z` suspends (`fg` resumes). While something runs, `^C`

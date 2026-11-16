@@ -572,7 +572,7 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
     if SRV:
         from rshm import sftp  # noqa: E402
         sftp.argv = lambda h, batch=False, timeout=8: ["sh", "-c", f"exec {SRV}"]
-        fs.connect = lambda h, *a: None
+        fs.connect = lambda h, *a: "Welcome to srv"  # what the login said first (a banner's headline): to the log
         (W / "rsub").mkdir()
         (W / "rsub" / "f").write_text("f")
         (W / "bad.zip").write_bytes(b"junk")
@@ -580,7 +580,7 @@ if config.tomllib:  # the config drives these (its [commands], [hosts], themes):
         os.truncate(W / "huge", 3 * ui.HEAD)  # 3 MB of zeros: binary
         CFG.write_text(f'[hosts]\nsrv = {{ host = "srv", path = "{W}" }}\n')
         app = start("@", "/srv", "\n", "\n", "/a.txt", "\n", K.F3, "q")
-        assert app.P.fs.name == "srv" and app.P.cwd == str(W)
+        assert app.P.fs.name == "srv" and app.P.cwd == str(W) and "srv: Welcome to srv" in log(app)
         was = app.O.host, app.O.cwd
         more(app, "o", "P", "\n")  # packed into a host: built here, sent over
         with tarfile.open(W / "a.txt.tar.gz") as tf:

@@ -1,6 +1,6 @@
 """Logins: one OpenSSH master per destination, reused by everything; stopped when rshm exits.
 Everything about reaching a host (user, key, jump, password) is ~/.ssh/config's business, never rshm's."""
-import hashlib, os, re, signal, subprocess, tempfile
+import hashlib, os, re, signal, subprocess, tempfile, threading
 from pathlib import Path
 
 
@@ -14,10 +14,19 @@ def argv(h, batch=False, timeout=8):  # ssh keeps the FIRST value of an option: 
     return ["ssh", *(x for k, v in o.items() for x in ("-o", f"{k}={v}"))]
 
 
-def last(f):  # the last line written to a stderr file: what ssh had to say
+def lines(f):  # the lines written to a stderr file: what ssh had to say, a banner's colours and controls left out
     f.seek(0)
-    lines = f.read().decode(errors="replace").strip().splitlines()
-    return lines[-1] if lines else ""
+    text = re.sub(r"\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?|.)", "", f.read().decode(errors="replace"))
+    return [ln for ln in (" ".join(re.sub(r"[\x00-\x1f\x7f]", " ", x).split()) for x in text.splitlines()) if ln]
+
+
+def last(f):
+    return (lines(f) or [""])[-1]
+
+
+def told(f, rc):  # what ssh said, in a line: why it failed (its last), else its banner's headline (its first), if any
+    said = lines(f)
+    return (said[-1] if said else f"exit {rc}") if rc else (said or [""])[0]
 
 
 def quiet(cmd):  # run detached from any terminal -> (exit code, last stderr line)
@@ -25,7 +34,7 @@ def quiet(cmd):  # run detached from any terminal -> (exit code, last stderr lin
         # own session: masters and their jump tunnels outlive whatever terminal rshm runs in
         rc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
                             start_new_session=True).returncode
-        return rc, last(err) or f"exit {rc}"
+        return rc, told(err, rc)
 
 
 def unreachable(err):  # the network failed (retry later), as opposed to the server refusing us (typing may help)
@@ -55,18 +64,32 @@ def login(cmd):  # ssh on the terminal, in its own process group put in the fore
             os.tcsetpgrp(fd, os.getpgrp())
             signal.signal(signal.SIGTTOU, signal.SIG_DFL)
 
+        done = threading.Event()
+
+        def echo():  # what ssh and its ProxyCommand say while you log in (banner, "waking up...", the server's
+            at = 0   # instructions), shown as it comes, as plain ssh shows it; nothing after: the screen is rshm's again
+            while True:
+                b = os.pread(err.fileno(), 65536, at)
+                if b:
+                    at += os.write(fd, b)
+                elif done.wait(0.05):
+                    return
+        show = threading.Thread(target=echo, daemon=True)
+        show.start()
         try:
             rc = subprocess.call(cmd, stderr=err, preexec_fn=front)
         finally:
+            done.set()
+            show.join()
             os.tcsetpgrp(fd, os.getpgrp())
             signal.signal(signal.SIGTTOU, ttou)
             os.close(fd)
-        return rc, last(err) or f"exit {rc}"
+        return rc, told(err, rc)
 
 
-def connect(h, tty, say, timeout=None, ask=True):  # h's master up and logged in; tty(fn, *a) runs fn with the terminal
-    if quiet([*argv(h), "-O", "check", h["host"]])[0] == 0:
-        return
+def connect(h, tty, say, timeout=None, ask=True):  # h's master up and logged in -> what the login said (a banner's
+    if quiet([*argv(h), "-O", "check", h["host"]])[0] == 0:  # headline, "" if nothing); tty(fn, *a) runs fn with the
+        return ""                                            # terminal
     say(f"connecting {h['host']}…")
     (Path.home() / ".ssh").mkdir(mode=0o700, exist_ok=True)  # where the login sockets live
     # one try, terminal handed over (a gpg passphrase asks even in batch mode); ControlPersist: backgrounds once in.
@@ -77,3 +100,4 @@ def connect(h, tty, say, timeout=None, ask=True):  # h's master up and logged in
     if rc:
         raise ConnectionError(err if err.startswith(h["host"]) else f"{h['host']}: {err}")
     LOGINS.append(h)
+    return err

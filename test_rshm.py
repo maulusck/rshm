@@ -69,6 +69,13 @@ try:
 except OSError as e:
     assert str(e) == "ambiguous host 'lab': lab/pi, lab/box"
 
+last = lambda b: ssh.last(io.BytesIO(b))  # what ssh said last, a banner's colours and controls left out
+assert last(b"\x1b[1;31mWelcome\x1b[0m\r\n\x1b]0;t\x07\tdown\x1b[?25h for\x07 maintenance\n\n") == "down for maintenance"
+assert last(b"") == last(b"\n \n") == "" and last(b"a\nssh: refused\n") == "ssh: refused"
+told = lambda b, rc: ssh.told(io.BytesIO(b), rc)  # a login in: its banner's headline; failed: why (its last line)
+assert told(b"\x1b[1mWelcome to box\x1b[0m\nrules apply\n", 0) == "Welcome to box" and told(b"", 0) == ""
+assert told(b"Welcome\nssh: refused\n", 255) == "ssh: refused" and told(b"", 255) == "exit 255"
+
 # ssh argv: the ssh config does user/key/jump; rshm adds only its master and timeouts, once (ssh keeps the first)
 a = ssh.argv(H["web"], batch=True, timeout=3)
 assert a[0] == "ssh" and "BatchMode=yes" in a and [o for o in a if o.startswith("ConnectTimeout")] == ["ConnectTimeout=3"]

@@ -2,7 +2,7 @@
 """The hard proof, seeded so any failure replays (RSHM_SEED=n): random trees copied every way and held against
 cp -a; text, editor, viewer, wire and config fuzzed; and faults: the link dropped before any reply, ^C before any
 reply, a full disk, a source that shrinks mid-copy. Against a real sftp-server, no network, no sshd."""
-import hashlib, os, random, re, shutil, stat, subprocess, sys, tempfile
+import hashlib, os, random, re, shutil, signal, stat, subprocess, sys, tempfile
 from pathlib import Path
 
 from rshm import config, edit, fs, screen, sftp, ui, view
@@ -352,6 +352,19 @@ try:
 except OSError as e:
     assert "before SFTP" in str(e) and "Welcome" in str(e), e
 BANNER[:] = []
+argv, said = sftp.argv, []  # a startup file that waits for input: no timer of ours; the wait is named, and Esc (^C here)
+sftp.argv = lambda h, batch=False, timeout=8: ["sh", "-c", "printf 'Press Enter' >&2; sleep 9"]  # stops it
+r = fs.Remote({"host": "test"}, None, said.append)
+signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+signal.alarm(1)
+try:
+    r.sftp()
+    raise AssertionError("a server that never answers, answered")
+except KeyboardInterrupt:
+    pass
+signal.alarm(0)
+assert said == ["test: waiting for SFTP (a startup file on it, ~/.ssh/rc or .bashrc, waiting for input?)"] and r.sf is None
+sftp.argv = argv
 
 # a server that answers a read with less than asked: the rest is fetched, the bytes are exact
 wait, SHORT = sftp.SFTP.wait, [3]

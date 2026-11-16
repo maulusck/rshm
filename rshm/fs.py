@@ -178,18 +178,22 @@ class Remote:  # a host; its SFTP session opens on first use and reopens after a
     PRIMS = {"stat", "listdir", "readlink", "links", "free", "mkdir", "rmdir", "unlink", "rename", "symlink", "hardlink", "chattr",
              "read", "write"}
 
-    def __init__(s, h, tty, say):  # tty(fn, *a): fn run with the terminal handed over; say(what): what's going on
-        s.h, s.tty, s.say, s.sf, s.name = h, tty, say, None, h["host"]
+    def __init__(s, h, tty, say, note=None):  # tty(fn, *a): fn run with the terminal handed over; say(what): what's
+        s.h, s.tty, s.say, s.note, s.sf, s.name = h, tty, say, note, None, h["host"]  # going on; note(line): to the log
 
     def sftp(s):
         if not (s.sf and s.sf.alive()):
             s.sf = None  # until the new session is up: a failed login is a refusal, not a dropped link
             s.login()
+            if s.say:  # at once normally; a wait (Esc stops it, as any) is the server's startup files'
+                s.say(f"{s.name}: waiting for SFTP (a startup file on it, ~/.ssh/rc or .bashrc, waiting for input?)")
             s.sf = SFTP(s.h).init()
         return s.sf
 
-    def login(s):  # the host's master, logged in
-        connect(s.h, s.tty, s.say)
+    def login(s):  # the host's master, logged in; what its banner says first, to the log
+        said = connect(s.h, s.tty, s.say)
+        if said and s.note:
+            s.note(f"{s.name}: {said}")
 
     def __getattr__(s, n):  # the primitives are the session's own
         if n not in Remote.PRIMS:
@@ -212,7 +216,7 @@ class Remote:  # a host; its SFTP session opens on first use and reopens after a
             s.sf.close()
 
     def twin(s):  # a second session to the same host, on the same login
-        return Remote(s.h, s.tty, s.say)
+        return Remote(s.h, s.tty, s.say, s.note)
 
 
 class Archive:  # a zip, a tar (gz, bz2, xz) or one compressed file, browsed read-only like a folder; all Python's own

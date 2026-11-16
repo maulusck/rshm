@@ -396,7 +396,7 @@ class App:
         return s.tty(subprocess.call, cmd, cwd=cwd)
 
     def fsfor(s, h):  # one Remote per destination: both panes on one host share its session
-        return s.local if h is LOCAL else s.remotes.setdefault(h["host"], Remote(h, s.tty, s.busy))
+        return s.local if h is LOCAL else s.remotes.setdefault(h["host"], Remote(h, s.tty, s.busy, s.note))
 
     def ticker(s, label, total):  # progress: how far, how fast, how long still
         last, seen, rate, pos = s.clock(), 0, None, {}

@@ -480,7 +480,8 @@ try:
         # ssh reads the real user's ~/.ssh/config, not $HOME's: point it at this one (jump children get -F too)
         (T / "bin").mkdir()
         (T / "bin" / "ssh").write_text(  # a login also gets a gpg-agent-like prompt, written straight onto the terminal
-            f'#!/bin/sh\ncase " $* " in *" -N "*) printf "\\033[1;20HPINENTRY-WAS-HERE" > "$GPG_TTY";; esac\n'
+            f'#!/bin/sh\ncase " $* " in *" -N "*) printf "\\033[1;20HPINENTRY-WAS-HERE" > "$GPG_TTY"; '
+            'echo "waking up the host..." >&2; sleep 0.3;; esac\n'
             f'exec {shutil.which("ssh")} -F {T}/.ssh/config "$@"\n')
         (T / "bin" / "ssh").chmod(0o755)
         os.environ["PATH"] = f"{T}/bin:{os.environ['PATH']}"
@@ -498,6 +499,7 @@ try:
             t = Term(["jumped"], L)  # `rshm jumped`: the host on the right, this machine on the left
             t.until(lambda s: "jumped:/" in s and "big.bin" in s and "PINENTRY" not in s, "both panes, nothing left over")
             assert b"PINENTRY-WAS-HERE" in b"".join(t.raw)  # it was written, and drawn over
+            assert b"waking up the host..." in b"".join(t.raw)  # what a ProxyCommand says on stderr: shown while it logs in
             assert len(sockets()) == 1, sockets()
             t.keys("Tab", "/big", "Enter", "c", "^U", str(T / "remote"), "Enter")  # copy with the keys
             t.until(lambda s: "✓ copied big.bin to jumped:" in s, "copied")
