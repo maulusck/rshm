@@ -246,6 +246,20 @@ for keys, want in ((["x", "\n"], "x"), (["\x7f", "\n"], ""), ([K.END, "x", "\n"]
     SCR.keys.extend(keys)
     assert screen.readline(SCR, "q:", "prefill") == want, (keys, want)
 
+# --- ↑ ↓ walk the answers given before, oldest at the top, back down to the line as it was; ⏎ adds one, once ---
+hist = []
+for a in "aba":
+    SCR = VT(5, 40)
+    SCR.keys.extend([a, "\n"])
+    screen.readline(SCR, "q:", hist=hist)
+assert hist == ["b", "a"], hist
+for keys, want in (([K.UP, "\n"], "a"), ([K.UP, K.UP, K.UP, "\n"], "b"), ([K.UP, K.UP, K.DOWN, K.DOWN, "\n"], "cur"),
+                   ([K.UP, "x", "\n"], "curx"), ([K.UP, "\x1b"], None)):
+    SCR = VT(5, 40)
+    SCR.keys.extend(keys)
+    assert screen.readline(SCR, "q:", "cur", hist=hist) == want, (keys, want)
+assert hist == ["a", "b", "cur", "curx"], hist  # each once, the last given last
+
 # --- Tab completes a path: as far as the matches agree, then each in turn (which of how many shown) ---
 tab = lambda t: fs.complete(fs.Local(), str(W), t)
 for keys, want in ((["\x15", *"su", "\t", "\n"], "sub/"), (["\x15", *"b", "\t", "\t", "\n"], "bin.dat"),

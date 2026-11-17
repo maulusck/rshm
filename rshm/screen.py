@@ -133,10 +133,11 @@ def key(scr):  # a key, waited for: a read a signal cut short is no key
             return scr.get_wch()
 
 
-def line(scr, q, text="", attr=0, back=None, ends=(), complete=None):  # the one-line editor on the bottom row
-    i, fresh, cyc, k = len(text), bool(text), None, 0  # -> (text, the key that ended it: ⏎, Esc (^C too), or one of
-    cursor(1)  # ends); back() repaints behind it. ← → Home End Del ^A ^E ^K ^U ^W edit. A prefilled answer
-    try:                # is selected (typing replaces it, ⌫ clears it); Tab: complete(typed) -> what it can become
+def line(scr, q, text="", attr=0, back=None, ends=(), complete=None, hist=None):  # the one-line editor on the bottom
+    i, fresh, cyc, k = len(text), bool(text), None, 0  # row -> (text, the key that ended it: ⏎, Esc (^C too), or one
+    h, typed = len(hist or ()), text  # of ends); back() repaints behind it. ← → Home End Del ^A ^E ^K ^U ^W edit.
+    cursor(1)  # A prefilled answer is selected (typing replaces it, ⌫ clears it); Tab: complete(typed) -> what it can
+    try:       # become; ↑ ↓: the answers given before (hist, oldest first; ⏎ adds this one), back down to this one
         while True:
             back and back()
             H, W = scr.getmaxyx()
@@ -152,6 +153,8 @@ def line(scr, q, text="", attr=0, back=None, ends=(), complete=None):  # the one
                 scr.move(H - 1, max(0, min(col - start, W - 2)))
             c = key(scr)
             if c in ("\n", "\r", curses.KEY_ENTER) or c in ends:
+                if hist is not None and text.strip() and c not in ends:
+                    hist[:] = [x for x in hist if x != text][-99:] + [text]  # ponytail: this session's, not saved
                 return text, "\n" if c in ("\r", curses.KEY_ENTER) else c
             if c in ("\x1b", "\x03"):
                 return text, "\x1b"
@@ -170,7 +173,13 @@ def line(scr, q, text="", attr=0, back=None, ends=(), complete=None):  # the one
                 text, i = head + text[i:], len(head)
                 continue
             cyc = None
-            if c in (curses.KEY_BACKSPACE, "\x7f", "\b", curses.KEY_DC) and was:
+            if c in (curses.KEY_UP, curses.KEY_DOWN) and hist:
+                if h == len(hist):
+                    typed = text  # the line as it was, for ↓ to come back to
+                h = max(0, min(len(hist), h + (1 if c == curses.KEY_DOWN else -1)))
+                text = hist[h] if h < len(hist) else typed
+                i = len(text)
+            elif c in (curses.KEY_BACKSPACE, "\x7f", "\b", curses.KEY_DC) and was:
                 text, i = "", 0
             elif c in (curses.KEY_BACKSPACE, "\x7f", "\b") and i:
                 text, i = text[:i - 1] + text[i:], i - 1
@@ -195,6 +204,6 @@ def line(scr, q, text="", attr=0, back=None, ends=(), complete=None):  # the one
         cursor(0)
 
 
-def readline(scr, q, text="", attr=0, back=None, complete=None):  # ⏎ takes the line as typed, Esc or ^C: None
-    text, k = line(scr, q, text, attr, back, complete=complete)
+def readline(scr, q, text="", attr=0, back=None, complete=None, hist=None):  # ⏎ takes the line as typed, Esc or
+    text, k = line(scr, q, text, attr, back, complete=complete, hist=hist)  # ^C: None
     return text if k == "\n" else None

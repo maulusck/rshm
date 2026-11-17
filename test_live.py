@@ -454,101 +454,101 @@ try:
                        capture_output=True, text=True)
     assert r.returncode == 1 and r.stderr == "rshm: not a terminal\n", r  # not a terminal at all
 
-    if config.tomllib:  # the hosts here are the config's group (Python 3.11 on); stress covers SFTP on any
-        # --- 2. hosts, through a throwaway sshd ---
-        sshd = shutil.which("sshd") or next((p for p in ("/usr/sbin/sshd", "/usr/local/sbin/sshd") if os.path.exists(p)), None)
-        sftp = next((p for p in ("/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server", "/usr/libexec/sftp-server",
-                                 "/usr/lib/ssh/sftp-server") if os.path.exists(p)), None)
-        if not (sshd and sftp):
-            sys.exit("screen ok (no sshd/sftp-server here: hosts skipped)")
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-        for k in ("host", "user"):
-            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", T / k], check=True)
-        (T / ".ssh").mkdir(mode=0o700, exist_ok=True)
-        (T / "user.pub").rename(T / "authorized_keys")
-        (T / "sshd_config").write_text(f"Port {port}\nListenAddress 127.0.0.1\nHostKey {T}/host\nAuthorizedKeysFile "
-                                       f"{T}/authorized_keys\nPidFile {T}/sshd.pid\nStrictModes no\nUsePAM no\n"
-                                       f"PasswordAuthentication no\nSubsystem sftp {sftp}\n")
-        srv = subprocess.Popen([sshd, "-D", "-e", "-f", T / "sshd_config"], stderr=subprocess.DEVNULL)
-        time.sleep(0.5)
-        me = os.environ.get("USER") or subprocess.run(["id", "-un"], stdout=subprocess.PIPE, text=True).stdout.strip()
-        (T / ".ssh" / "config").write_text(f"Host direct jumped\n\tUser {me}\n\tPort {port}\n\tIdentityFile {T}/user\n"
-                                           f"\tUserKnownHostsFile {T}/known_hosts\n\tStrictHostKeyChecking accept-new\n"
-                                           "Host direct\n\tHostName 127.0.0.1\nHost jumped\n\tHostName localhost\n\tProxyJump direct\n")
-        # ssh reads the real user's ~/.ssh/config, not $HOME's: point it at this one (jump children get -F too)
-        (T / "bin").mkdir()
-        (T / "bin" / "ssh").write_text(  # a login also gets a gpg-agent-like prompt, written straight onto the terminal
-            f'#!/bin/sh\ncase " $* " in *" -N "*) printf "\\033[1;20HPINENTRY-WAS-HERE" > "$GPG_TTY"; '
-            'echo "waking up the host..." >&2; sleep 0.3;; esac\n'
-            f'exec {shutil.which("ssh")} -F {T}/.ssh/config "$@"\n')
-        (T / "bin" / "ssh").chmod(0o755)
-        os.environ["PATH"] = f"{T}/bin:{os.environ['PATH']}"
-        sockets = lambda: sorted(p.name for p in (T / ".ssh").glob("rshm-" + "[0-9a-f]" * 16))
-        try:
-            L = T / "up"
-            (L / "sub").mkdir(parents=True)
-            data = os.urandom(3 * 1024 * 1024 + 7)
-            (L / "big.bin").write_bytes(data)
-            (L / "sub" / "x.sh").write_text("#!/bin/sh\n")
-            os.chmod(L / "sub" / "x.sh", 0o750)
-            (T / "remote").mkdir()
-            (T / "remote" / "r.txt").write_text("remote\n")
-            (T / "remote" / "r.lnk").symlink_to("r.txt")
-            t = Term(["jumped"], L)  # `rshm jumped`: the host on the right, this machine on the left
-            t.until(lambda s: "jumped:/" in s and "big.bin" in s and "PINENTRY" not in s, "both panes, nothing left over")
-            assert b"PINENTRY-WAS-HERE" in b"".join(t.raw)  # it was written, and drawn over
-            assert b"waking up the host..." in b"".join(t.raw)  # what a ProxyCommand says on stderr: shown while it logs in
-            assert len(sockets()) == 1, sockets()
-            t.keys("Tab", "/big", "Enter", "c", "^U", str(T / "remote"), "Enter")  # copy with the keys
-            t.until(lambda s: "✓ copied big.bin to jumped:" in s, "copied")
-            assert (T / "remote" / "big.bin").read_bytes() == data
-            t.keys("Tab", "s")  # a shell on the host, on the same login; exit brings the screen back
-            time.sleep(1)
-            t.keys("echo RSHM_$((1+1)); exit\n")
-            t.until(lambda s: b"RSHM_2" in b"".join(t.raw) and "10quit" in s and "RSHM_2" not in s, "shell, then the screen")
-            assert len(sockets()) == 1, sockets()
-            t.keys("p")  # the live check
-            t.until(lambda s: "✓ jumped: up" in s, "live check")
-            t.keys("r", "@")  # a reload keeps the pane's host and its folder
-            t.until(lambda s: "● jumped" in s, "reload: the host is still this pane's")
-            t.keys("@")
-            t.keys("g", "^U", str(T / "remote"), "Enter", "/r.txt", "Enter", "F3")  # a host's file, rshm's viewer and editor
-            t.until(lambda s: s.startswith("remote") and "jumped:" in s, "remote file viewed")
-            t.keys("q", "F4", "Z", "^S", "^X")
-            t.until(lambda s: "10quit" in s and (T / "remote" / "r.txt").read_text() == "Zremote\n", "remote file edited")
-            t.keys("Esc", "/r.lnk", "Enter")  # a host's link: its target shown; your [open] tool gets what it points to
-            t.until(lambda s: "r.lnk@ -> r.txt" in s, "a host's link and its target")
+    # --- 2. hosts, through a throwaway sshd ---
+    sshd = shutil.which("sshd") or next((p for p in ("/usr/sbin/sshd", "/usr/local/sbin/sshd") if os.path.exists(p)), None)
+    sftp = next((p for p in ("/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server", "/usr/libexec/sftp-server",
+                             "/usr/lib/ssh/sftp-server") if os.path.exists(p)), None)
+    if not (sshd and sftp):
+        sys.exit("screen ok (no sshd/sftp-server here: hosts skipped)")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    for k in ("host", "user"):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", T / k], check=True)
+    (T / ".ssh").mkdir(mode=0o700, exist_ok=True)
+    (T / "user.pub").rename(T / "authorized_keys")
+    (T / "sshd_config").write_text(f"Port {port}\nListenAddress 127.0.0.1\nHostKey {T}/host\nAuthorizedKeysFile "
+                                   f"{T}/authorized_keys\nPidFile {T}/sshd.pid\nStrictModes no\nUsePAM no\n"
+                                   f"PasswordAuthentication no\nSubsystem sftp {sftp}\n")
+    srv = subprocess.Popen([sshd, "-D", "-e", "-f", T / "sshd_config"], stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    me = os.environ.get("USER") or subprocess.run(["id", "-un"], stdout=subprocess.PIPE, text=True).stdout.strip()
+    (T / ".ssh" / "config").write_text(f"Host direct jumped\n\tUser {me}\n\tPort {port}\n\tIdentityFile {T}/user\n"
+                                       f"\tUserKnownHostsFile {T}/known_hosts\n\tStrictHostKeyChecking accept-new\n"
+                                       "Host direct\n\tHostName 127.0.0.1\nHost jumped\n\tHostName localhost\n\tProxyJump direct\n")
+    # ssh reads the real user's ~/.ssh/config, not $HOME's: point it at this one (jump children get -F too)
+    (T / "bin").mkdir()
+    (T / "bin" / "ssh").write_text(  # a login also gets a gpg-agent-like prompt, written straight onto the terminal
+        f'#!/bin/sh\ncase " $* " in *" -N "*) printf "\\033[1;20HPINENTRY-WAS-HERE" > "$GPG_TTY"; '
+        'echo "waking up the host..." >&2; sleep 0.3;; esac\n'
+        f'exec {shutil.which("ssh")} -F {T}/.ssh/config "$@"\n')
+    (T / "bin" / "ssh").chmod(0o755)
+    os.environ["PATH"] = f"{T}/bin:{os.environ['PATH']}"
+    sockets = lambda: sorted(p.name for p in (T / ".ssh").glob("rshm-" + "[0-9a-f]" * 16))
+    try:
+        L = T / "up"
+        (L / "sub").mkdir(parents=True)
+        data = os.urandom(3 * 1024 * 1024 + 7)
+        (L / "big.bin").write_bytes(data)
+        (L / "sub" / "x.sh").write_text("#!/bin/sh\n")
+        os.chmod(L / "sub" / "x.sh", 0o750)
+        (T / "remote").mkdir()
+        (T / "remote" / "r.txt").write_text("remote\n")
+        (T / "remote" / "r.lnk").symlink_to("r.txt")
+        t = Term(["jumped"], L)  # `rshm jumped`: the host on the right, this machine on the left
+        t.until(lambda s: "jumped:/" in s and "big.bin" in s and "PINENTRY" not in s, "both panes, nothing left over")
+        assert b"PINENTRY-WAS-HERE" in b"".join(t.raw)  # it was written, and drawn over
+        assert b"waking up the host..." in b"".join(t.raw)  # what a ProxyCommand says on stderr: shown while it logs in
+        assert len(sockets()) == 1, sockets()
+        t.keys("Tab", "/big", "Enter", "c", "^U", str(T / "remote"), "Enter")  # copy with the keys
+        t.until(lambda s: "✓ copied big.bin to jumped:" in s, "copied")
+        assert (T / "remote" / "big.bin").read_bytes() == data
+        t.keys("Tab", "s")  # a shell on the host, on the same login; exit brings the screen back
+        time.sleep(1)
+        t.keys("echo RSHM_$((1+1)); exit\n")
+        t.until(lambda s: b"RSHM_2" in b"".join(t.raw) and "10quit" in s and "RSHM_2" not in s, "shell, then the screen")
+        assert len(sockets()) == 1, sockets()
+        t.keys("p")  # the live check
+        t.until(lambda s: "✓ jumped: up" in s, "live check")
+        t.keys("r", "@")  # a reload keeps the pane's host and its folder
+        t.until(lambda s: "● jumped" in s, "reload: the host is still this pane's")
+        t.keys("@")
+        t.keys("g", "^U", str(T / "remote"), "Enter", "/r.txt", "Enter", "F3")  # a host's file, rshm's viewer and editor
+        t.until(lambda s: s.startswith("remote") and "jumped:" in s, "remote file viewed")
+        t.keys("q", "F4", "Z", "^S", "^X")
+        t.until(lambda s: "10quit" in s and (T / "remote" / "r.txt").read_text() == "Zremote\n", "remote file edited")
+        t.keys("Esc", "/r.lnk", "Enter")  # a host's link: its target shown; your [open] tool gets what it points to
+        t.until(lambda s: "r.lnk@ -> r.txt" in s, "a host's link and its target")
+        if config.tomllib:  # the [open] tool is the config's (Python 3.11 on)
             t.keys("Enter")
             t.until(lambda s: "10quit" in s and (T / "got.txt").exists() and (T / "got.txt").read_text() == "Zremote\n",
                     "a tool on a host's link gets its content")
-            assert t.quit() == 0
-            time.sleep(2)
-            assert sockets() == [], f"the screen left logins behind: {sockets()}"
+        assert t.quit() == 0
+        time.sleep(2)
+        assert sockets() == [], f"the screen left logins behind: {sockets()}"
 
-            h = config.find(config.hosts(config.read(T / "rshm.toml")), "jumped")[0][1]
-            R, Lo = fs.Remote(h, tty=lambda fn, *a: fn(*a), say=lambda m: None), fs.Local()
-            tick = lambda *a, **k: None
-            for src, sp, dst, dp in ((Lo, L, R, T / "remote" / "t"), (R, T / "remote" / "t", Lo, T / "down"),
-                                     (R, T / "remote" / "t" / "big.bin", R, T / "remote" / "same.bin")):  # the last within one host
-                tick.finished, tick.skipped = set(), []
-                fs.copy(src, str(sp), dst, str(dp), tick)
-            fs.save(R, str(T / "remote" / "saved.txt"), b"over ssh\n")  # what the built-in editor's ^S does
-            R.chattr(str(T / "remote" / "saved.txt"), {"perm": 0o604})
-            R.close()
-            sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-            assert sha(T / "down" / "big.bin") == sha(L / "big.bin") == sha(T / "remote" / "t" / "big.bin") == sha(T / "remote" / "same.bin")
-            assert (T / "remote" / "saved.txt").read_bytes() == b"over ssh\n" and (T / "remote" / "saved.txt").stat().st_mode & 0o777 == 0o604
-            assert (T / "down" / "sub" / "x.sh").stat().st_mode & 0o777 == 0o750
-            assert not list(T.rglob("*" + fs.PART)) and len(sockets()) == 1
-            assert ssh.quiet([*ssh.argv(h, batch=True, timeout=3), "jumped", "true"])[0] == 0  # the live check
-            ssh.logout()
-            time.sleep(2)
-            assert sockets() == [], f"logins left behind: {sockets()}"
-        finally:
-            srv.terminate()
-            srv.wait()
+        h = config.find(config.hosts(config.read(T / "rshm.toml")), "jumped")[0][1]
+        R, Lo = fs.Remote(h, tty=lambda fn, *a: fn(*a), say=lambda m: None), fs.Local()
+        tick = lambda *a, **k: None
+        for src, sp, dst, dp in ((Lo, L, R, T / "remote" / "t"), (R, T / "remote" / "t", Lo, T / "down"),
+                                 (R, T / "remote" / "t" / "big.bin", R, T / "remote" / "same.bin")):  # the last within one host
+            tick.finished, tick.skipped = set(), []
+            fs.copy(src, str(sp), dst, str(dp), tick)
+        fs.save(R, str(T / "remote" / "saved.txt"), b"over ssh\n")  # what the built-in editor's ^S does
+        R.chattr(str(T / "remote" / "saved.txt"), {"perm": 0o604})
+        R.close()
+        sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+        assert sha(T / "down" / "big.bin") == sha(L / "big.bin") == sha(T / "remote" / "t" / "big.bin") == sha(T / "remote" / "same.bin")
+        assert (T / "remote" / "saved.txt").read_bytes() == b"over ssh\n" and (T / "remote" / "saved.txt").stat().st_mode & 0o777 == 0o604
+        assert (T / "down" / "sub" / "x.sh").stat().st_mode & 0o777 == 0o750
+        assert not list(T.rglob("*" + fs.PART)) and len(sockets()) == 1
+        assert ssh.quiet([*ssh.argv(h, batch=True, timeout=3), "jumped", "true"])[0] == 0  # the live check
+        ssh.logout()
+        time.sleep(2)
+        assert sockets() == [], f"logins left behind: {sockets()}"
+    finally:
+        srv.terminate()
+        srv.wait()
     print("live ok")
 finally:
     shutil.rmtree(T, ignore_errors=True)

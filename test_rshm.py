@@ -842,6 +842,8 @@ for host, ok in (("up", True), ("x", False), ("z", True)):
         assert not ok and host in str(e), (host, e)
 assert ssh.LOGINS == [{"host": "z"}] and handed == [(ssh.login, "x"), (ssh.login, "z")]  # "up" was in already
 assert not any("ConnectTimeout" in " ".join(c) for c in calls if c[-2:] == ["-N", "z"])
+assert all(c[-3] == "-f" for c in calls if c[-2:] == ["-N", "z"])  # backgrounded by -f: OpenSSH 8.4 (Debian 11) left
+# to ControlPersist opens a shell on the host instead, reading the terminal: the login never returns
 try:  # asked not to ask (the live check): batch, detached, its own timeout; the refusal is the answer
     ssh.connect({"host": "w"}, tty, lambda m: None, timeout=3, ask=False)
     raise AssertionError("asked")

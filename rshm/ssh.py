@@ -92,10 +92,12 @@ def connect(h, tty, say, timeout=None, ask=True):  # h's master up and logged in
         return ""                                            # terminal
     say(f"connecting {h['host']}…")
     (Path.home() / ".ssh").mkdir(mode=0o700, exist_ok=True)  # where the login sockets live
-    # one try, terminal handed over (a gpg passphrase asks even in batch mode); ControlPersist: backgrounds once in.
+    # one try, terminal handed over (a gpg passphrase asks even in batch mode); -f: backgrounds once in. Not left to
+    # ControlPersist: OpenSSH 8.4 (Debian 11) then reconnects as a client that ignores -N and opens a shell on the
+    # host, reading our terminal: the login never returns
     # no ConnectTimeout of ours unless asked: a ProxyCommand may take its time (wake a VM), ~/.ssh/config decides;
     # ponytail: a blackholed route waits for TCP's own timeout (~2 min) or ^C
-    cmd = [*argv(h, batch=not ask, timeout=timeout), "-N", h["host"]]
+    cmd = [*argv(h, batch=not ask, timeout=timeout), "-f", "-N", h["host"]]
     rc, err = tty(login if ask else quiet, cmd)
     if rc:
         raise ConnectionError(err if err.startswith(h["host"]) else f"{h['host']}: {err}")

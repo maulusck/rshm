@@ -191,6 +191,7 @@ class Pane:  # a folder on some file system, or the host list to pick one
 class App:
     def __init__(s, scr, cfg, note=""):  # note: what the start had to say (a TERM drawn as another)
         s.cfg, s.scr, s.msg, s.typing, s.extra = cfg, window(scr), "", None, {}  # extra: destinations in no list
+        s.answers = {}  # each question's answers so far, ↑ in its input line brings them back
         s.panes, s.focus, s.rects, s.single, s.spans, s.opened = [Pane(), Pane()], 0, [], False, {}, None  # opened: menu
         s.local, s.remotes, s.hosts, s.c, s.cmds, s.theme_name, s.shown = Local(), {}, {}, {}, {}, "default", ""
         s.dots, s.order, s.rev = True, "name", False
@@ -1276,7 +1277,7 @@ class App:
     def ask(s, q, text="", fs=None, base=""):  # the one-line input at the bottom, over the current screen; a path's:
         with s.still():                             # fs, base: Tab completes it there
             return (readline(s.scr, q, text, s.C["acc"] | curses.A_BOLD, s.paint,
-                             fs and (lambda t: complete(fs, base, t))) or "").strip()
+                             fs and (lambda t: complete(fs, base, t)), s.answers.setdefault(q, [])) or "").strip()
 
     def sigint(s, *_):  # ^C come as a signal (a terminal that kept its signals, kill -INT): the key ^C, read next,
         with contextlib.suppress(curses.error):  # like one typed. Never an exception in the middle of a read

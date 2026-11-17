@@ -21,7 +21,7 @@ Install: `rshm.pyz` anywhere on your `PATH`, or the deb, rpm, apk or Arch packag
 ## Keys
 
 mc's. `F1`, `F9` and `rshm --help` list them all, from the one table (`KEYS` in `ui.py`) that runs them. Prompts edit
-like a shell line, `Tab` completes paths here or on a host (`Shift+Tab` back). Mouse: tap selects, tap again opens.
+like a shell line, `Tab` completes paths here or on a host (`Shift+Tab` back), `↑` `↓` bring back the answers given before. Mouse: tap selects, tap again opens.
 
 ## How it behaves
 
